@@ -26,6 +26,9 @@ uniform vec4  u_selParams2;     // next 4 (or overflow for modifiers)
 uniform vec4  u_selParams3;     // capsule b endpoint / bezier p1
 uniform vec4  u_selParams4;     // bezier p2
 uniform float u_selK;           // smooth-op blend factor
+uniform float u_focusDist;      // DOF focus plane distance
+uniform float u_focalLen;       // effective focal length (zoom)
+uniform float u_aperture;       // lens radius (0 = pinhole)
 `;
 
 // u_frame is a float (used as a weight in accumulation); cast to int for
@@ -122,7 +125,16 @@ void main(){
     vec2 uv=(gl_FragCoord.xy-u_res*.5)/u_res.y;
     uv+=(vec2(ptHash(),ptHash())-.5)/u_res.y;
     vec3 ro=u_camPos;
-    vec3 rd=normalize(u_camFwd+uv.x*u_camRight+uv.y*u_camUp);
+    // Build ray with configurable focal length (zoom).
+    vec3 rd=normalize(u_camFwd*u_focalLen + uv.x*u_camRight + uv.y*u_camUp);
+    // Aperture bokeh: jitter origin on the lens, re-aim at the focus point.
+    if(u_aperture>0.){
+        float a=6.28318530718*ptHash();
+        vec2 lens=u_aperture*sqrt(ptHash())*vec2(cos(a),sin(a));
+        vec3 focus=ro+rd*u_focusDist;
+        ro+=lens.x*u_camRight + lens.y*u_camUp;
+        rd=normalize(focus-ro);
+    }
 
     vec3 ctot=vec3(0.);
     float refContrib=1.;
@@ -197,6 +209,7 @@ class SDFRenderer {
     this._matColArr = null; // Float32Array(3*N) → u_matCol[]
     this._matMatArr = null; // Float32Array(4*N) → u_matMat[]
     this.bounces   = 2;
+    this.cameraParams = { focusDistance: 3.2, focalLen: 1.0, aperture: 0.0 };
     this.maxAccum  = 1024;
     this._lastTree = null;
     this._accumFrame = 0;
@@ -379,10 +392,22 @@ class SDFRenderer {
 
   resetAccum() { this._accumFrame = 0; }
 
+  setCameraParams(p) {
+    if (!p) return;
+    const fd = Math.max(0.01, +p.focusDistance || this.cameraParams.focusDistance);
+    const fl = Math.max(0.05, +p.focalLen      || this.cameraParams.focalLen);
+    const ap = Math.max(0,    +p.aperture      || 0);
+    if (fd === this.cameraParams.focusDistance &&
+        fl === this.cameraParams.focalLen &&
+        ap === this.cameraParams.aperture) return;
+    this.cameraParams = { focusDistance: fd, focalLen: fl, aperture: ap };
+    this.resetAccum();
+  }
+
   _stateSig() {
-    const c = this.camera, d = this.selData;
+    const c = this.camera, d = this.selData, p = this.cameraParams;
     const ds = d ? JSON.stringify([d.position, d.rotation, d.scale, d.params, d.type]) : '';
-    return `${c.theta}|${c.phi}|${c.distance}|${this.selMat}|${this.selectedId||''}|${ds}|${this.bounces}`;
+    return `${c.theta}|${c.phi}|${c.distance}|${this.selMat}|${this.selectedId||''}|${ds}|${this.bounces}|${p.focusDistance}|${p.focalLen}|${p.aperture}`;
   }
 
   _createFBO(w, h) {
@@ -446,6 +471,10 @@ class SDFRenderer {
     u('u_camUp','uniform3fv',up);
     u('u_selMat','uniform1f',this.selMat);
     u('u_time','uniform1f',performance.now()/1000);
+    const cp = this.cameraParams;
+    u('u_focusDist','uniform1f', cp.focusDistance);
+    u('u_focalLen','uniform1f',  cp.focalLen);
+    u('u_aperture','uniform1f',  cp.aperture);
     if (this._matCount > 0 && this._matColArr && this._matMatArr) {
       const lc = gl.getUniformLocation(prog, 'u_matCol[0]');
       if (lc !== null) gl.uniform3fv(lc, this._matColArr);
@@ -484,12 +513,13 @@ class SDFRenderer {
 
   projectToScreen(p, w, h) {
     const { eye, fwd, right, up } = this.getCamVecs();
+    const fL = this.cameraParams.focalLen || 1;
     const v = sub3(p, eye);
     const vf = dot3(v, fwd);
     if (vf <= 0.01) return null;
     const vr = dot3(v, right);
     const vu = dot3(v, up);
-    return { x: vr/vf * h + w/2, y: h/2 - vu/vf * h, depth: vf };
+    return { x: vr/vf * h * fL + w/2, y: h/2 - vu/vf * h * fL, depth: vf };
   }
 
   render() {

@@ -4,8 +4,8 @@ const { useState, useEffect, useRef, useCallback, useMemo } = React;
 const PROJECT_FORMAT = 'iapafoto-edit';
 const PROJECT_VERSION = 1;
 const AUTOSAVE_KEY = 'iapafoto-edit:autosave:v1';
-function serializeProject(tree, palette, camera, bounces) {
-  return { format: PROJECT_FORMAT, version: PROJECT_VERSION, tree, palette, camera, bounces };
+function serializeProject(tree, palette, camera, bounces, cameraParams) {
+  return { format: PROJECT_FORMAT, version: PROJECT_VERSION, tree, palette, camera, bounces, cameraParams };
 }
 function isValidProject(p) {
   return p && p.format === PROJECT_FORMAT && p.tree && Array.isArray(p.palette);
@@ -73,10 +73,11 @@ function getCamVecs(cam) {
 }
 function projectPt(p, cam, w, h) {
   const { eye, fwd, right, up } = getCamVecs(cam);
+  const fL = (cam && typeof cam.focalLen === 'number') ? cam.focalLen : 1;
   const v = sub3(p, eye);
   const vf = dot3(v, fwd);
   if (vf <= 0.01) return null;
-  return { x: dot3(v,right)/vf*h + w/2, y: h/2 - dot3(v,up)/vf*h, depth: vf };
+  return { x: dot3(v,right)/vf*h*fL + w/2, y: h/2 - dot3(v,up)/vf*h*fL, depth: vf };
 }
 
 // ── Btn ───────────────────────────────────────────────────────────
@@ -983,6 +984,7 @@ function App() {
   const [palette,      setPalette]      = useState(() => _initProj?.palette || DEFAULT_PALETTE);
   const [materialsOpen,setMaterialsOpen]= useState(false);
   const [bounces,      setBounces]      = useState(() => (typeof _initProj?.bounces === 'number') ? _initProj.bounces : 2);
+  const [cameraParams, setCameraParams] = useState(() => _initProj?.cameraParams || { focusDistance: 3.2, focalLen: 2.8, aperture: 0.1 });
   const fileInputRef = useRef(null);
 
   const startResize = (side) => (e) => {
@@ -1001,10 +1003,12 @@ function App() {
   const gizmoCanvasRef= useRef(null);
   const vpDragRef     = useRef(null);   // viewport mouse drag (camera / gizmo)
   const treeDragId    = useRef(null);   // tree drag-and-drop
-  const cameraRef     = useRef(camera);
+  const cameraRef     = useRef({ ...camera, focalLen: 1 });
   const fastPathRef   = useRef(false);  // last update touched only selected shape
   const prevSelIdRef  = useRef(null);
-  useEffect(()=>{ cameraRef.current = camera; }, [camera]);
+  // Merge camera state with focalLen so every projection/drag consumer picks
+  // up the current zoom — projectPt reads cam.focalLen for the FOV factor.
+  useEffect(()=>{ cameraRef.current = { ...camera, focalLen: cameraParams.focalLen }; }, [camera, cameraParams.focalLen]);
 
   // ── Undo / Redo ──────────────────────────────────────────────────
   // Snapshots of { tree, palette } — selection isn't tracked (it's a view
@@ -1088,9 +1092,11 @@ function App() {
   // Autosave: localStorage, debounced 800ms on tree/palette/camera/bounces.
   const bouncesRef = useRef(bounces);
   useEffect(()=>{ bouncesRef.current = bounces; }, [bounces]);
+  const cameraParamsRef = useRef(cameraParams);
+  useEffect(()=>{ cameraParamsRef.current = cameraParams; }, [cameraParams]);
 
   const saveProject = useCallback(() => {
-    const data = serializeProject(treeRef.current, paletteRef.current, cameraRef.current, bouncesRef.current);
+    const data = serializeProject(treeRef.current, paletteRef.current, cameraRef.current, bouncesRef.current, cameraParamsRef.current);
     const blob = new Blob([JSON.stringify(data, null, 2)], { type:'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -1122,6 +1128,7 @@ function App() {
     setPalette(p.palette);
     if (p.camera) setCamera(p.camera);
     if (typeof p.bounces === 'number') setBounces(clamp(Math.round(p.bounces), 1, 5));
+    if (p.cameraParams) setCameraParams(p.cameraParams);
     setSelId(null);
     setHistoryTick(t => t + 1);
   }, []);
@@ -1150,7 +1157,7 @@ function App() {
   const newProject = useCallback(() => {
     if (!window.confirm('Nouvelle scène ? Les changements non sauvegardés seront perdus.')) return;
     applyLoadedProject(
-      { tree: createDefaultScene(), palette: DEFAULT_PALETTE, camera: { theta:0.65, phi:0.35, distance:3.2 }, bounces: 2 },
+      { tree: createDefaultScene(), palette: DEFAULT_PALETTE, camera: { theta:0.65, phi:0.35, distance:3.2 }, bounces: 2, cameraParams: { focusDistance: 3.2, focalLen: 2.8, aperture: 0.1 } },
       { undoable: false }
     );
   }, [applyLoadedProject]);
@@ -1160,11 +1167,11 @@ function App() {
     const t = setTimeout(() => {
       try {
         localStorage.setItem(AUTOSAVE_KEY,
-          JSON.stringify(serializeProject(tree, palette, camera, bounces)));
+          JSON.stringify(serializeProject(tree, palette, camera, bounces, cameraParams)));
       } catch {}
     }, 800);
     return () => clearTimeout(t);
-  }, [tree, palette, camera, bounces]);
+  }, [tree, palette, camera, bounces, cameraParams]);
 
   const selNode = useMemo(()=> selId ? findNode(tree, selId) : null, [tree, selId]);
   // Ancestor chain of the selected node — lets the gizmo match the compiled transform stack.
@@ -1176,6 +1183,7 @@ function App() {
   // Boot renderer
   useEffect(()=>{
     const r = new SDFRenderer(glCanvasRef.current);
+    r.setCameraParams(cameraParams);
     rendererRef.current = r;
     return ()=>r.destroy();
   }, []);
@@ -1229,13 +1237,18 @@ function App() {
     if (rendererRef.current) rendererRef.current.setBounces(bounces);
   }, [bounces]);
 
+  // Live camera params → renderer (focusDistance / focalLen / aperture).
+  useEffect(()=>{
+    if (rendererRef.current) rendererRef.current.setCameraParams(cameraParams);
+  }, [cameraParams]);
+
   // Draw gizmo every frame
   useEffect(()=>{
     const cvs = gizmoCanvasRef.current; if(!cvs) return;
     const ctx = cvs.getContext('2d');
     const w=cvs.clientWidth, h=cvs.clientHeight;
     cvs.width=w; cvs.height=h;
-    drawGizmo(ctx, selNode, selAncestors, mode, hoverAxis, camera, w, h);
+    drawGizmo(ctx, selNode, selAncestors, mode, hoverAxis, { ...camera, focalLen: cameraParams.focalLen }, w, h);
   });
 
   // Keyboard shortcuts
@@ -1405,12 +1418,13 @@ function App() {
     } else if (d.type==='gizmo') {
       const cam=cameraRef.current;
       const {right,up}=getCamVecs(cam);
+      const fL=cam.focalLen||1;
       const dx=e.clientX-d.startMouse[0], dy=e.clientY-d.startMouse[1];
       const axDir=d.axis==='x'?[1,0,0]:d.axis==='y'?[0,1,0]:[0,0,1];
       if (mode==='translate') {
         // Drag produces a world-space delta; project back into the parent frame
         // (where selNode.position lives) by peeling off every ancestor's transform.
-        const delta=dragAxisDelta(dx,dy,axDir,right,up,cam.distance/d.h);
+        const delta=dragAxisDelta(dx,dy,axDir,right,up,cam.distance/(d.h*fL));
         const worldD=scale3(axDir,delta);
         const parentD=ancestorsInverseDelta(d.ancestors, worldD);
         updateNode(d.nodeId,{position:d.startPos.map((v,i)=>v+parentD[i])});
@@ -1420,7 +1434,7 @@ function App() {
         const nr=[...d.startRot]; nr[idx]=d.startRot[idx]+proj;
         updateNode(d.nodeId,{rotation:nr});
       } else if (mode==='scale') {
-        const factor=1+dragAxisDelta(dx,dy,axDir,right,up,cam.distance/d.h)*1.5;
+        const factor=1+dragAxisDelta(dx,dy,axDir,right,up,cam.distance/(d.h*fL))*1.5;
         updateNode(d.nodeId,{scale:Math.max(0.01, d.startSc*factor)});
       }
     } else if (d.type==='cp') {
@@ -1429,14 +1443,15 @@ function App() {
       // to get the delta in the node's local frame (where cp.pos is stored).
       const cam=cameraRef.current;
       const {right,up}=getCamVecs(cam);
+      const fL=cam.focalLen||1;
       const dx=e.clientX-d.startMouse[0], dy=e.clientY-d.startMouse[1];
       let worldD;
       if (d.cpAxis) {
         const axDir=d.cpAxis==='x'?[1,0,0]:d.cpAxis==='y'?[0,1,0]:[0,0,1];
-        const delta=dragAxisDelta(dx,dy,axDir,right,up,cam.distance/d.h);
+        const delta=dragAxisDelta(dx,dy,axDir,right,up,cam.distance/(d.h*fL));
         worldD=scale3(axDir,delta);
       } else {
-        const s=d.depth/d.h;
+        const s=d.depth/(d.h*fL);
         worldD=add3(scale3(right,dx*s),scale3(up,-dy*s));
       }
       const localD=localDeltaChain(d.ancestors, d.nodeSnapshot, worldD);
@@ -1482,6 +1497,21 @@ function App() {
           <NumInput value={bounces} step={1} min={1} max={5} width={34}
             onChange={v=>setBounces(Math.max(1, Math.min(5, Math.round(v))))}/>
         </div>
+        <div style={{ display:'flex', alignItems:'center', gap:5 }} title="Focus distance for depth of field">
+          <span style={{ fontSize:10, color:C.dim }}>Focus</span>
+          <NumInput value={cameraParams.focusDistance} step={0.1} min={0.1} max={20} width={40}
+            onChange={v=>setCameraParams({...cameraParams, focusDistance:v})}/>
+        </div>
+        <div style={{ display:'flex', alignItems:'center', gap:5 }} title="Focal length">
+          <span style={{ fontSize:10, color:C.dim }}>Focal</span>
+          <NumInput value={cameraParams.focalLen} step={0.1} min={0.5} max={10} width={40}
+            onChange={v=>setCameraParams({...cameraParams, focalLen:v})}/>
+        </div>
+        <div style={{ display:'flex', alignItems:'center', gap:5 }} title="Aperture (depth of field blur)">
+          <span style={{ fontSize:10, color:C.dim }}>Aper.</span>
+          <NumInput value={cameraParams.aperture} step={0.01} min={0} max={1} width={40}
+            onChange={v=>setCameraParams({...cameraParams, aperture:v})}/>
+        </div>
         <div style={{ width:1, height:20, background:C.border }}/>
         <Btn onClick={newProject} title="Nouvelle scène">✦ New</Btn>
         <Btn onClick={loadProject} title="Charger un projet (.json)">⤒ Load</Btn>
@@ -1490,7 +1520,7 @@ function App() {
           onChange={onProjectFileChosen} style={{ display:'none' }}/>
         <div style={{ width:1, height:20, background:C.border }}/>
         <Btn onClick={()=>setMaterialsOpen(true)} title="Éditer la palette">◆ Matériaux</Btn>
-        <Btn onClick={()=>setExportCode(exportShadertoyPathTraced(tree, palette, bounces))}
+        <Btn onClick={()=>setExportCode(exportShadertoyPathTraced(tree, palette, bounces, cameraParams))}
           title="Export path-traced multi-pass Shadertoy">↗ Shadertoy</Btn>
       </div>
 

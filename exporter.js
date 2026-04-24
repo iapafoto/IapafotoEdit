@@ -8,10 +8,11 @@
 //
 // The compiler is invoked with no selectedId and materialUniforms=false,
 // so everything is baked as literals — no uniforms to wire in Shadertoy.
-function exportShadertoyPathTraced(tree, palette, bounces=2) {
+function exportShadertoyPathTraced(tree, palette, bounces=2, cameraParams={focusDistance:3.2, focalLen:2.8, aperture:0.1}) {
   const { sceneFn, colorFn, matFn, header, extraFns } =
     compileSDF(tree, null, palette, { materialUniforms: false });
   const B = Math.max(1, Math.min(5, Math.round(bounces)));
+  const { focusDistance = 3.2, focalLen = 2.8, aperture = 0.1 } = cameraParams;
 
   const bufferA = `// ============================================================
 // BUFFER A — progressive path tracer
@@ -70,7 +71,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord){
 
     vec2 uv=(2.*(fragCoord.xy + vec2(ptHash(),ptHash())-.5)-iResolution.xy)/iResolution.y;
     vec3 rd;
-    camera(ro, rd, dist, 2.8, .1, uv);
+    camera(ro, rd, ${focusDistance}, ${focalLen}, ${aperture}, uv);
 
     vec3 ctot=vec3(0.);
     float refContrib=1.;
