@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node -c \"C:\\\\Users\\\\sebastien.durand\\\\Desktop\\\\Demoscene\\\\Editeur\\\\IapafotoEdit\\\\core.js\")",
+      "Bash(npx --yes --package=@babel/core@7 --package=@babel/preset-react@7 -- babel --presets=@babel/preset-react --no-babelrc --no-config-file App.jsx)",
+      "Bash(node -e \"const fs=require\\('fs'\\);const src=fs.readFileSync\\('App.jsx','utf8'\\);try{new Function\\('React','ReactDOM',src\\);console.log\\('OK_FN'\\)}catch\\(e\\){console.log\\('ERR',e.message\\)}\")",
+      "Bash(node -e ' *)",
+      "Bash(node _check.js)",
+      "Bash(node -c \"C:/Users/sebastien.durand/Desktop/Demoscene/Editeur/IapafotoEdit/core.js\")",
+      "Bash(node -c \"C:/Users/sebastien.durand/Desktop/Demoscene/Editeur/IapafotoEdit/compiler.js\")",
+      "Bash(node --check \"C:/Users/sebastien.durand/Desktop/Demoscene/Editeur/IapafotoEdit/compiler.js\")",
+      "Bash(node -c compiler.js)",
+      "Bash(gh auth *)",
+      "Bash(git --version)",
+      "Bash(git config *)",
+      "Bash(where gh *)",
+      "Bash(winget list *)",
+      "Bash(git init *)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)"
+    ]
+  }
+}
