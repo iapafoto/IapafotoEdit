@@ -353,12 +353,13 @@ class SDFRenderer {
     this.resetAccum();
   }
 
-  _compileScene(tree, palette) {
+  _compileScene(tree, palette, userLibrary) {
     this._lastTree = tree;
+    this._lastUserLibrary = userLibrary || [];
     const pal = (palette && palette.length) ? palette : DEFAULT_PALETTE;
     this.palette = pal;
     const { sceneFn, colorFn, matFn, header, extraFns, usedMaterials } =
-      compileSDF(tree, this.selectedId, pal, { materialUniforms: true });
+      compileSDF(tree, this.selectedId, pal, { materialUniforms: true, userLibrary: this._lastUserLibrary });
     this._matCount = usedMaterials.length;
     const { cols, mats } = this._packMaterials(usedMaterials);
     this._matColArr = cols;
@@ -380,13 +381,13 @@ class SDFRenderer {
     return { usedMaterials };
   }
 
-  updateScene(tree, palette) { return this._compileScene(tree, palette || this.palette); }
+  updateScene(tree, palette, userLibrary) { return this._compileScene(tree, palette || this.palette, userLibrary); }
 
   setBounces(n) {
     const v = Math.max(1, Math.min(5, Math.round(n)));
     if (v === this.bounces) return;
     this.bounces = v;
-    if (this._lastTree) this._compileScene(this._lastTree, this.palette);
+    if (this._lastTree) this._compileScene(this._lastTree, this.palette, this._lastUserLibrary);
     this.resetAccum();
   }
 

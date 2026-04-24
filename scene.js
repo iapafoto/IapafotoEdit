@@ -239,7 +239,7 @@ function moveNodeAt(tree, dragId, targetId, mode) {
 }
 function flattenShapes(root) {
   if (!root) return [];
-  if (SHAPE_TYPES.includes(root.type)) return [root];
+  if (SHAPE_TYPES.includes(root.type) || root.type === 'library_ref') return [root];
   return (root.children||[]).flatMap(flattenShapes);
 }
 

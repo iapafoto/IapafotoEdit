@@ -87,6 +87,7 @@ function compileSDF(root, selectedId, palette, opts) {
   opts = opts || {};
   const materialUniforms = !!opts.materialUniforms;
   palette = (palette && palette.length) ? palette : [FALLBACK_MATERIAL];
+  const libMap = mergeLibrary(opts.userLibrary);
 
   const usedMats = [];
   const matKeyToIdx = new Map();
@@ -106,6 +107,37 @@ function compileSDF(root, selectedId, palette, opts) {
   const helperFns = [];
   const smoothFns = new Set();
   const shapes = [];
+  const userGlslHeaders = [];   // user-defined GLSL sources emitted once in header
+  const usedUserGlsl = new Set(); // prevent duplicate emission
+
+  // Evaluate a library entry's callTemplate substituting param literals and qVar.
+  function evalCallTemplate(entry, nodeParams, qVar) {
+    const params = entry.params || [];
+    return (entry.callTemplate || '').replace(/\{(\w+)\}/g, (_, key) => {
+      if (key === 'q') return qVar;
+      const param = params.find(p => p.key === key);
+      if (!param) return '0.';
+      const val = (nodeParams || {})[key];
+      if (param.type === 'vec3') {
+        const arr = Array.isArray(val) ? val : (Array.isArray(param.default) ? param.default : [0, 0, 0]);
+        return glslVec(3, arr);
+      }
+      const num = (val !== undefined && val !== null) ? val : (param.default || 0);
+      return glslNum(num, true);
+    });
+  }
+
+  // True if this library_ref resolves to a GLSL entry (leaf-like in emission).
+  function isGlslRef(node) {
+    if (node.type !== 'library_ref') return false;
+    const e = libMap.get(node.libraryId);
+    return !!(e && e.source === 'glsl');
+  }
+
+  // True if node is a "leaf" in the SDF emission sense.
+  function isLeafNode(node) {
+    return SHAPE_TYPES.includes(node.type) || isGlslRef(node);
+  }
 
   // Baked or uniform expression for a single scalar param key.
   function makeParamExpr(node, isSelected, reg) {
@@ -310,10 +342,57 @@ function compileSDF(root, selectedId, palette, opts) {
     return name;
   }
 
+  // Build distance expression for a library_ref with source:'glsl'.
+  // Emits the GLSL source into userGlslHeaders (once per entry), applies transform,
+  // evaluates the callTemplate, and handles outputKind.
+  function prepLibraryGlslExpr(node, pVar, indent) {
+    const entry = libMap.get(node.libraryId);
+    if (!entry || entry.source !== 'glsl') return '1e10';
+
+    if (!usedUserGlsl.has(entry.id)) {
+      usedUserGlsl.add(entry.id);
+      userGlslHeaders.push(entry.glslSrc);
+    }
+
+    const isSel = selectedId && node.id === selectedId;
+    let { qVar, scaleMul } = emitShapeQ(node, pVar, isSel, indent);
+
+    if (hasPT(node)) {
+      const name = `pT_${helperCnt++}`;
+      helperFns.push(`vec3 ${name}(vec3 p){\n${wrapBody(node.pTransform, 'p')}\n}`);
+      lines.push(`${indent}q=${name}(${qVar});`);
+      qVar = 'q';
+    }
+
+    const callExpr = evalCallTemplate(entry, node.params, qVar);
+    const sId = shapeEmitCnt++;
+    let dExpr;
+    if (entry.outputKind === 'dist_k' || entry.outputKind === 'dist_mat') {
+      const tmp = `t${sId}_0`;
+      lines.push(`${indent}vec2 ${tmp}=${callExpr};`);
+      dExpr = `${tmp}.x`;
+    } else {
+      dExpr = callExpr;
+    }
+
+    const scaledD = scaleMul ? `(${dExpr})*${scaleMul}` : dExpr;
+    if (hasDT(node)) {
+      const name = `dT_${helperCnt++}`;
+      helperFns.push(`float ${name}(float d, vec3 p){\n${wrapBody(node.dTransform, 'd')}\n}`);
+      return `${name}(${scaledD},${qVar})`;
+    }
+    return scaledD;
+  }
+
   // Build the shape's distance expression. Emits any preparatory lines
   // (q= assignment, capsule/bezier temp) and returns the GLSL distance expr
   // (already including scale multiplier and dTransform wrapping).
   // Does NOT emit the accumulator update — the caller decides assign vs combine.
+  function prepLeafExpr(node, pVar, indent) {
+    if (node.type === 'library_ref') return prepLibraryGlslExpr(node, pVar, indent);
+    return prepShapeExpr(node, pVar, indent);
+  }
+
   function prepShapeExpr(node, pVar, indent) {
     const reg = SHAPE_REGISTRY[node.type];
     if (!reg) return '1e10';
@@ -359,7 +438,7 @@ function compileSDF(root, selectedId, palette, opts) {
   // into the destination accumulator (dName, mName).
   function emitFirstLeaf(node, pName, dName, mName, parentInherited, indent) {
     const mi = registerShapeMaterial(node, parentInherited);
-    const dExpr = prepShapeExpr(node, pName, indent);
+    const dExpr = prepLeafExpr(node, pName, indent);
     lines.push(`${indent}${dName}=${dExpr}; ${mName}=${mi}.;`);
   }
 
@@ -368,7 +447,7 @@ function compileSDF(root, selectedId, palette, opts) {
   // handle k=0 natively, so one uniform call site covers every CSG case.
   function emitSubsequentLeaf(node, pName, dName, mName, parentInherited, combineOp, kExpr, indent) {
     const mi = registerShapeMaterial(node, parentInherited);
-    const dExpr = prepShapeExpr(node, pName, indent);
+    const dExpr = prepLeafExpr(node, pName, indent);
     const matLit = `${mi}.`;
     switch (combineOp) {
       case 'union':
@@ -418,7 +497,7 @@ function compileSDF(root, selectedId, palette, opts) {
     let accumSlot = aDepth;
     for (let i = 1; i < children.length; i++) {
       const child = children[i];
-      if (SHAPE_TYPES.includes(child.type)) {
+      if (isLeafNode(child)) {
         emitSubsequentLeaf(child, pName, dName, mName, childInherited, combineOp, kExpr, indent);
         continue;
       }
@@ -437,6 +516,41 @@ function compileSDF(root, selectedId, palette, opts) {
   function emitSubtree(node, pName, dName, mName, parentInherited, indent, pDepth, aDepth) {
     if (SHAPE_TYPES.includes(node.type)) {
       emitFirstLeaf(node, pName, dName, mName, parentInherited, indent);
+      return;
+    }
+
+    // library_ref: GLSL source → leaf, subtree → expand inline
+    if (node.type === 'library_ref') {
+      if (isGlslRef(node)) {
+        emitFirstLeaf(node, pName, dName, mName, parentInherited, indent);
+      } else {
+        // Subtree ref: apply the ref node's transform, then compile entry.tree inline
+        const entry = libMap.get(node.libraryId);
+        if (!entry || !entry.tree) {
+          lines.push(`${indent}${dName}=1e9; ${mName}=0.;`);
+          return;
+        }
+        const isSel = selectedId && node.id === selectedId;
+        const mutatesP = isSel || !isIdentityTransform(node) || hasPT(node);
+        let workPName = pName, workIndent = indent, newPDepth = pDepth;
+        let scaleMul = null, blockOpened = false;
+        if (mutatesP) {
+          blockOpened = true; newPDepth = pDepth + 1;
+          const newPName = 'p' + suf(newPDepth);
+          lines.push(`${indent}{`); workIndent = indent + '  ';
+          scaleMul = emitNewP(node, pName, newPName, isSel, workIndent).scaleMul;
+          workPName = newPName;
+        }
+        const childInherited = node.materialId || parentInherited;
+        emitSubtree(entry.tree, workPName, dName, mName, childInherited, workIndent, newPDepth, aDepth);
+        if (scaleMul) lines.push(`${workIndent}${dName}*=${scaleMul};`);
+        if (hasDT(node)) {
+          const name = `dT_${helperCnt++}`;
+          helperFns.push(`float ${name}(float d, vec3 p){\n${wrapBody(node.dTransform, 'd')}\n}`);
+          lines.push(`${workIndent}${dName}=${name}(${dName},${workPName});`);
+        }
+        if (blockOpened) lines.push(`${indent}}`);
+      }
       return;
     }
     const isSel  = selectedId && node.id === selectedId;
@@ -510,7 +624,7 @@ function compileSDF(root, selectedId, palette, opts) {
   }
 
   const sceneFn = `vec2 sceneMap(vec3 p){\n  float d=1e9, m=0.;\n  vec3 q;\n${lines.join('\n')}\n  return vec2(d,m);\n}`;
-  const header  = buildGlslHeader(deps);
+  const header  = buildGlslHeader(deps) + (userGlslHeaders.length ? '\n' + userGlslHeaders.join('\n') : '');
   const smoothSrc = [];
   if (smoothFns.has('smin')) smoothSrc.push(SMIN_GLSL);
   if (smoothFns.has('smax')) smoothSrc.push(SMAX_GLSL);

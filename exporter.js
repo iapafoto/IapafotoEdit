@@ -8,9 +8,9 @@
 //
 // The compiler is invoked with no selectedId and materialUniforms=false,
 // so everything is baked as literals — no uniforms to wire in Shadertoy.
-function exportShadertoyPathTraced(tree, palette, bounces=2, cameraParams={focusDistance:3.2, focalLen:2.8, aperture:0.1}) {
+function exportShadertoyPathTraced(tree, palette, bounces=2, cameraParams={focusDistance:3.2, focalLen:2.8, aperture:0.1}, userLibrary=[]) {
   const { sceneFn, colorFn, matFn, header, extraFns } =
-    compileSDF(tree, null, palette, { materialUniforms: false });
+    compileSDF(tree, null, palette, { materialUniforms: false, userLibrary });
   const B = Math.max(1, Math.min(5, Math.round(bounces)));
   const { focusDistance = 3.2, focalLen = 2.8, aperture = 0.1 } = cameraParams;
 

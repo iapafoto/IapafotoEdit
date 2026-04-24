@@ -122,6 +122,7 @@ function buildGlslHeader(deps) {
 const SHAPE_REGISTRY = {
   sphere: {
     label: 'Sphere', icon: '●',
+    outputKind: 'dist',
     defaults: { radius: 0.5 },
     params: [{ key:'radius', label:'Radius', type:'number', min:0.001, step:0.01 }],
     glslDeps: ['sdSphere'],
@@ -131,6 +132,7 @@ const SHAPE_REGISTRY = {
   },
   box: {
     label: 'Box', icon: '■',
+    outputKind: 'dist',
     defaults: { width:0.5, height:0.5, depth:0.5, radius:0 },
     params: [
       { key:'width',  label:'Width',  type:'number', step:0.01, min:0.001 },
@@ -150,6 +152,7 @@ const SHAPE_REGISTRY = {
   },
   cylinder: {
     label: 'Cylinder', icon: '⬡',
+    outputKind: 'dist',
     defaults: { radius:0.3, height:0.6 },
     params: [
       { key:'radius', label:'Radius', type:'number', step:0.01, min:0.001 },
@@ -162,6 +165,7 @@ const SHAPE_REGISTRY = {
   },
   torus: {
     label: 'Torus', icon: '◎',
+    outputKind: 'dist',
     defaults: { R:0.4, r:0.12 },
     params: [
       { key:'R', label:'Major R', type:'number', step:0.01, min:0.001 },
@@ -174,6 +178,7 @@ const SHAPE_REGISTRY = {
   },
   capsule: {
     label: 'Capsule', icon: '⊃',
+    outputKind: 'dist_k',
     defaults: { a:[0,-0.2,0], b:[0,0.2,0], radius:0.15, profile:'' },
     params: [
       { key:'a',       label:'A',          type:'vec3',   step:0.01 },
@@ -209,6 +214,7 @@ const SHAPE_REGISTRY = {
   },
   bezier: {
     label: 'Bezier', icon: '⌒',
+    outputKind: 'dist_k',
     defaults: { b0:[-0.3,0,0], b1:[0,0.4,0], b2:[0.3,0,0], radius:0.1, profile:'' },
     params: [
       { key:'b0',      label:'P0',           type:'vec3',   step:0.01 },
@@ -244,6 +250,7 @@ const SHAPE_REGISTRY = {
   },
   plane: {
     label: 'Plane', icon: '━',
+    outputKind: 'dist',
     defaults: { offset:0 },
     params: [{ key:'offset', label:'Offset', type:'number', step:0.05 }],
     glslDeps: ['sdPlane'],

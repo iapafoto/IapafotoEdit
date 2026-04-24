@@ -4,8 +4,8 @@ const { useState, useEffect, useRef, useCallback, useMemo } = React;
 const PROJECT_FORMAT = 'iapafoto-edit';
 const PROJECT_VERSION = 1;
 const AUTOSAVE_KEY = 'iapafoto-edit:autosave:v1';
-function serializeProject(tree, palette, camera, bounces, cameraParams) {
-  return { format: PROJECT_FORMAT, version: PROJECT_VERSION, tree, palette, camera, bounces, cameraParams };
+function serializeProject(tree, palette, camera, bounces, cameraParams, userLibrary) {
+  return { format: PROJECT_FORMAT, version: PROJECT_VERSION, tree, palette, camera, bounces, cameraParams, userLibrary: userLibrary || [] };
 }
 function isValidProject(p) {
   return p && p.format === PROJECT_FORMAT && p.tree && Array.isArray(p.palette);
@@ -264,7 +264,7 @@ function PopupMenu({ trigger, children }) {
 }
 
 // ── AddMenu shared content ────────────────────────────────────────
-function AddMenuContent({ onAdd, close }) {
+function AddMenuContent({ onAdd, close, userLibrary }) {
   return (
     <>
       <MenuSection label="Shapes">
@@ -287,6 +287,17 @@ function AddMenuContent({ onAdd, close }) {
             onClick={()=>{ onAdd(t); close(); }} />
         ))}
       </MenuSection>
+      {userLibrary && userLibrary.length > 0 && (
+        <>
+          <div style={{ borderTop:`1px solid ${C.border}`, marginTop:2 }}/>
+          <MenuSection label="Bibliothèque">
+            {userLibrary.map(entry=>(
+              <MenuItem key={entry.id} icon={entry.icon||'◉'} label={entry.label} color='#44ddcc'
+                onClick={()=>{ onAdd('library_ref', entry); close(); }} />
+            ))}
+          </MenuSection>
+        </>
+      )}
     </>
   );
 }
@@ -295,6 +306,7 @@ function AddMenuContent({ onAdd, close }) {
 function TreeItem({ node, depth, selectedId, isRoot, onSelect, onAdd, onDelete, onDragStart, onDragOver, onDrop, dropTarget }) {
   const [open, setOpen] = useState(true);
   const [hov, setHov] = useState(false);
+  const isLibRef = node.type === 'library_ref';
   const isShape = SHAPE_TYPES.includes(node.type);
   const isOp    = OP_TYPES.includes(node.type);
   const isMod   = MODIFIER_TYPES.includes(node.type);
@@ -302,8 +314,8 @@ function TreeItem({ node, depth, selectedId, isRoot, onSelect, onAdd, onDelete, 
   const isSel   = node.id === selectedId;
   const isDrop  = dropTarget && dropTarget.id === node.id;
   const dropMode= isDrop ? dropTarget.mode : null;
-  const tint    = isShape ? '#7799ff' : isMod ? '#bb88ff' : '#ffaa55';
-  const icon    = isShape ? SHAPE_ICONS[node.type] : isMod ? MODIFIER_ICONS[node.type] : OP_ICONS[node.type];
+  const tint    = isLibRef ? '#44ddcc' : isShape ? '#7799ff' : isMod ? '#bb88ff' : '#ffaa55';
+  const icon    = isLibRef ? (node.icon || '◉') : isShape ? SHAPE_ICONS[node.type] : isMod ? MODIFIER_ICONS[node.type] : OP_ICONS[node.type];
 
   // Compute drop mode from mouse Y within the row.
   // Groups have a 3-zone layout (before / inside / after);
@@ -480,9 +492,9 @@ function PropsPanel({ node, onChange, palette, tree, isRoot, onOpenMaterials }) 
           <ShapeParams node={node} updP={updP}/>
         </div>
       )}
-      {(isShape || isOp || isMod) && (
+      {(isShape || isOp || isMod || node.type === 'library_ref') && (
         <div style={{ marginBottom:12 }}>
-          <SecTitle>{isShape ? 'Transform' : 'Group Transform'}</SecTitle>
+          <SecTitle>{isShape || node.type === 'library_ref' ? 'Transform' : 'Group Transform'}</SecTitle>
           <Vec3Row label="Position" value={node.position||[0,0,0]} onChange={v=>upd('position',v)}/>
           <Vec3Row label="Rotation" value={(node.rotation||[0,0,0]).map(deg)} onChange={v=>upd('rotation',v.map(rad))} step={0.5}/>
           <div style={{ display:'flex', alignItems:'center', gap:6, marginBottom:4 }}>
@@ -834,6 +846,152 @@ function hitTestGizmo(mx, my, selNode, ancestors, mode, cam, w, h) {
   return best;
 }
 
+// ── Library Modal ─────────────────────────────────────────────────
+// Manages the user SDF library: add GLSL entries, view/edit/delete entries,
+// and instantiate them into the current scene.
+function LibraryModal({ userLibrary, onSetUserLibrary, onAdd, onEdit, onClose }) {
+  const [glslEditorOpen, setGlslEditorOpen] = useState(false);
+  const [editingEntry, setEditingEntry]     = useState(null); // existing entry being GLSL-edited
+  const [glslSrc, setGlslSrc]               = useState('');
+  const [glslLabel, setGlslLabel]           = useState('');
+  const [glslKind, setGlslKind]             = useState('dist');
+  const [glslErr, setGlslErr]               = useState('');
+
+  const openNewGlsl = () => {
+    setEditingEntry(null);
+    setGlslSrc('float sdMyShape(vec3 p, float radius) {\n  return length(p) - radius;\n}');
+    setGlslLabel('');
+    setGlslKind('dist');
+    setGlslErr('');
+    setGlslEditorOpen(true);
+  };
+
+  const openEditGlsl = (entry) => {
+    setEditingEntry(entry);
+    setGlslSrc(entry.glslSrc || '');
+    setGlslLabel(entry.label);
+    setGlslKind(entry.outputKind || 'dist');
+    setGlslErr('');
+    setGlslEditorOpen(true);
+  };
+
+  const saveGlsl = () => {
+    if (editingEntry) {
+      const updated = updateGlslLibraryEntry({ ...editingEntry, label: glslLabel || editingEntry.label, outputKind: glslKind }, glslSrc);
+      if (!updated) { setGlslErr('Signature GLSL non reconnue.'); return; }
+      onSetUserLibrary(lib => lib.map(e => e.id === editingEntry.id ? updated : e));
+    } else {
+      const entry = createGlslLibraryEntry(glslSrc, glslLabel, glslKind);
+      if (!entry) { setGlslErr('Signature GLSL non reconnue (ex: float sdFoo(vec3 p, float r) {...}).'); return; }
+      onSetUserLibrary(lib => [...lib, entry]);
+    }
+    setGlslEditorOpen(false);
+  };
+
+  const deleteEntry = (id) => {
+    onSetUserLibrary(lib => lib.filter(e => e.id !== id));
+  };
+
+  return (
+    <div style={{ position:'fixed', inset:0, background:'rgba(0,0,0,.75)', zIndex:100,
+      display:'flex', alignItems:'center', justifyContent:'center' }} onClick={onClose}>
+      <div style={{ background:'#13131a', border:`1px solid ${C.border2}`, borderRadius:8,
+        width:600, maxHeight:'80vh', display:'flex', flexDirection:'column', padding:20 }}
+        onClick={e=>e.stopPropagation()}>
+
+        <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:12 }}>
+          <span style={{ color:'#fff', fontWeight:600, fontSize:13 }}>⊞ Bibliothèque SDF</span>
+          <div style={{ display:'flex', gap:8 }}>
+            <Btn onClick={openNewGlsl}>+ GLSL</Btn>
+            <Btn onClick={onClose}>Fermer</Btn>
+          </div>
+        </div>
+
+        {/* Built-in shapes (read-only) */}
+        <div style={{ fontSize:9, color:C.dim, textTransform:'uppercase', letterSpacing:'.07em', marginBottom:4 }}>
+          Primitives built-in
+        </div>
+        <div style={{ display:'flex', flexWrap:'wrap', gap:4, marginBottom:12 }}>
+          {SHAPE_TYPES.map(t=>(
+            <span key={t} style={{ background:'rgba(119,153,255,.08)', border:`1px solid rgba(119,153,255,.2)`,
+              borderRadius:3, padding:'2px 8px', fontSize:10, color:'#7799ff', fontFamily:'monospace' }}>
+              {SHAPE_ICONS[t]} {SHAPE_LABELS[t]}
+            </span>
+          ))}
+        </div>
+
+        {/* User-defined entries */}
+        <div style={{ fontSize:9, color:C.dim, textTransform:'uppercase', letterSpacing:'.07em', marginBottom:4 }}>
+          User-defined ({userLibrary.length})
+        </div>
+        <div style={{ flex:1, overflowY:'auto' }}>
+          {userLibrary.length === 0 && (
+            <div style={{ padding:'14px 0', fontSize:11, color:C.dim, textAlign:'center' }}>
+              Aucune entrée — ajoutez un SDF GLSL ou sauvegardez un groupe depuis la scène.
+            </div>
+          )}
+          {userLibrary.map((entry, idx)=>(
+            <div key={entry.id} style={{ display:'flex', alignItems:'center', gap:6,
+              padding:'6px 8px', borderBottom:`1px solid ${C.border}`, borderRadius:3 }}>
+              <span style={{ fontFamily:'monospace', fontSize:14, color:'#44ddcc', width:20 }}>{entry.icon||'◉'}</span>
+              <span style={{ flex:1, fontSize:11, color:C.text }}>{entry.label}</span>
+              <span style={{ fontSize:9, color:C.dim, padding:'1px 5px', background:'rgba(255,255,255,.04)',
+                borderRadius:2, fontFamily:'monospace' }}>
+                {entry.source === 'glsl' ? entry.outputKind : 'subtree'}
+              </span>
+              {entry.source === 'glsl' && (
+                <Btn small onClick={()=>openEditGlsl(entry)}>Éditer GLSL</Btn>
+              )}
+              {entry.source === 'subtree' && (
+                <Btn small onClick={()=>{ onEdit(idx); }}>Éditer</Btn>
+              )}
+              <Btn small onClick={()=>{ onAdd('library_ref', entry); onClose(); }}>
+                + Scène
+              </Btn>
+              <button onClick={()=>deleteEntry(entry.id)}
+                style={{ background:'rgba(255,60,80,.12)', color:'#ff6677', border:'none',
+                  borderRadius:3, padding:'2px 6px', fontSize:10,
+                  cursor:'pointer', fontFamily:'inherit' }}>✕</button>
+            </div>
+          ))}
+        </div>
+
+        {/* GLSL editor sub-panel */}
+        {glslEditorOpen && (
+          <div style={{ marginTop:12, borderTop:`1px solid ${C.border}`, paddingTop:12 }}>
+            <div style={{ display:'flex', gap:8, marginBottom:8, alignItems:'center' }}>
+              <input value={glslLabel} onChange={e=>setGlslLabel(e.target.value)}
+                placeholder={editingEntry ? editingEntry.label : 'Nom'}
+                style={{ flex:1, background:'#0d0d18', border:`1px solid ${C.border}`,
+                  borderRadius:3, padding:'3px 7px', color:C.text, fontSize:11, fontFamily:'inherit' }}/>
+              <select value={glslKind} onChange={e=>setGlslKind(e.target.value)}
+                style={{ background:'#0d0d18', border:`1px solid ${C.border}`, borderRadius:3,
+                  padding:'3px 7px', color:C.text, fontSize:11, fontFamily:'inherit' }}>
+                <option value="dist">dist (float)</option>
+                <option value="dist_k">dist_k (vec2: dist+k)</option>
+                <option value="dist_mat">dist_mat (vec2: dist+matId)</option>
+              </select>
+            </div>
+            <textarea value={glslSrc} onChange={e=>setGlslSrc(e.target.value)} rows={6}
+              spellCheck={false}
+              style={{ width:'100%', background:'#0a0a12', border:`1px solid ${C.border}`,
+                borderRadius:3, padding:'6px 8px', color:'#b8d4ff', fontSize:10,
+                fontFamily:'IBM Plex Mono,monospace', resize:'vertical' }}/>
+            {glslErr && <div style={{ color:'#ff6677', fontSize:10, marginTop:4 }}>{glslErr}</div>}
+            <div style={{ display:'flex', gap:8, marginTop:8 }}>
+              <Btn onClick={saveGlsl} active>Valider</Btn>
+              <Btn onClick={()=>setGlslEditorOpen(false)}>Annuler</Btn>
+              <span style={{ fontSize:9, color:C.dim, marginLeft:4, alignSelf:'center' }}>
+                Signature auto-parsée · premier paramètre vec3 = point
+              </span>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ── Materials Modal ───────────────────────────────────────────────
 // Palette editor: add, rename, recolor, tune reflection/roughness/spec.
 // Deleting a material is disabled if any node still references it
@@ -985,6 +1143,13 @@ function App() {
   const [materialsOpen,setMaterialsOpen]= useState(false);
   const [bounces,      setBounces]      = useState(() => (typeof _initProj?.bounces === 'number') ? _initProj.bounces : 2);
   const [cameraParams, setCameraParams] = useState(() => _initProj?.cameraParams || { focusDistance: 3.2, focalLen: 2.8, aperture: 0.1 });
+  const [userLibrary,  setUserLibrary]  = useState(() => _initProj?.userLibrary || []);
+  const [libModalOpen, setLibModalOpen] = useState(false);
+  // Library edit mode: swap scene tree for the entry's tree
+  const [editingLibEntry, setEditingLibEntry] = useState(null); // { index } | null
+  const originalSceneRef = useRef(null);
+  const userLibraryRef   = useRef(userLibrary);
+  useEffect(()=>{ userLibraryRef.current = userLibrary; }, [userLibrary]);
   const fileInputRef = useRef(null);
 
   const startResize = (side) => (e) => {
@@ -1048,6 +1213,7 @@ function App() {
       return;
     }
     if (h.suppress) { h.suppress = false; return; }
+    if (h.editMode) return; // no history tracking during library edit mode
     // First change in a burst — snapshot the PRE-change state.
     if (!h.pending) h.pending = h.lastCommitted;
     if (h.debounce) clearTimeout(h.debounce);
@@ -1082,8 +1248,38 @@ function App() {
     setHistoryTick(t => t + 1);
   }, []);
 
-  const canUndo = historyRef.current.past.length > 0;
-  const canRedo = historyRef.current.future.length > 0;
+  const canUndo = !editingLibEntry && historyRef.current.past.length > 0;
+  const canRedo = !editingLibEntry && historyRef.current.future.length > 0;
+
+  // ── Library edit mode ────────────────────────────────────────────
+  const enterLibraryEdit = useCallback((index) => {
+    const entry = userLibraryRef.current[index];
+    if (!entry || entry.source !== 'subtree') return;
+    originalSceneRef.current = treeRef.current;
+    historyRef.current.editMode = true;
+    historyRef.current.suppress = true;
+    setTree(deepCloneTree(entry.tree));
+    setEditingLibEntry({ index });
+    setSelId(null);
+    setLibModalOpen(false);
+  }, []);
+
+  const exitLibraryEdit = useCallback((save) => {
+    if (!editingLibEntry) return;
+    if (save) {
+      setUserLibrary(lib => {
+        const newLib = [...lib];
+        newLib[editingLibEntry.index] = { ...newLib[editingLibEntry.index], tree: deepCloneTree(treeRef.current) };
+        return newLib;
+      });
+    }
+    historyRef.current.editMode = false;
+    historyRef.current.suppress = true;
+    setTree(originalSceneRef.current);
+    originalSceneRef.current = null;
+    setEditingLibEntry(null);
+    setSelId(null);
+  }, [editingLibEntry]);
 
   // ── Save / Load / New ────────────────────────────────────────
   // Save: download JSON of current tree+palette+camera+bounces.
@@ -1096,7 +1292,7 @@ function App() {
   useEffect(()=>{ cameraParamsRef.current = cameraParams; }, [cameraParams]);
 
   const saveProject = useCallback(() => {
-    const data = serializeProject(treeRef.current, paletteRef.current, cameraRef.current, bouncesRef.current, cameraParamsRef.current);
+    const data = serializeProject(treeRef.current, paletteRef.current, cameraRef.current, bouncesRef.current, cameraParamsRef.current, userLibraryRef.current);
     const blob = new Blob([JSON.stringify(data, null, 2)], { type:'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -1124,11 +1320,14 @@ function App() {
     h.future = [];
     h.lastCommitted = { tree: p.tree, palette: p.palette };
     h.suppress = true;
+    h.editMode = false;
     setTree(p.tree);
     setPalette(p.palette);
     if (p.camera) setCamera(p.camera);
     if (typeof p.bounces === 'number') setBounces(clamp(Math.round(p.bounces), 1, 5));
     if (p.cameraParams) setCameraParams(p.cameraParams);
+    if (Array.isArray(p.userLibrary)) setUserLibrary(p.userLibrary);
+    setEditingLibEntry(null);
     setSelId(null);
     setHistoryTick(t => t + 1);
   }, []);
@@ -1162,16 +1361,17 @@ function App() {
     );
   }, [applyLoadedProject]);
 
-  // Autosave (debounced)
+  // Autosave (debounced) — disabled during library edit mode
   useEffect(() => {
+    if (editingLibEntry) return;
     const t = setTimeout(() => {
       try {
         localStorage.setItem(AUTOSAVE_KEY,
-          JSON.stringify(serializeProject(tree, palette, camera, bounces, cameraParams)));
+          JSON.stringify(serializeProject(tree, palette, camera, bounces, cameraParams, userLibrary)));
       } catch {}
     }, 800);
     return () => clearTimeout(t);
-  }, [tree, palette, camera, bounces, cameraParams]);
+  }, [tree, palette, camera, bounces, cameraParams, userLibrary, editingLibEntry]);
 
   const selNode = useMemo(()=> selId ? findNode(tree, selId) : null, [tree, selId]);
   // Ancestor chain of the selected node — lets the gizmo match the compiled transform stack.
@@ -1214,8 +1414,8 @@ function App() {
       return;
     }
     r.setSelection(selNode);
-    r.updateScene(tree, palette);
-  }, [tree, selId, palette]);
+    r.updateScene(tree, palette, userLibrary);
+  }, [tree, selId, palette, userLibrary]);
 
   // Selection highlight — disabled. Phase 1 switched shapeCol/shapeMat to
   // material IDs, so the shader's `firstHitMat` no longer identifies a
@@ -1304,15 +1504,20 @@ function App() {
     setSelId(s => s===id ? null : s);
   }, []);
 
-  // addNode: type = shape or op, parentId = explicit parent (optional)
+  // addNode: type = shape/op/modifier or 'library_ref'
+  // When type === 'library_ref', parentId is the library entry object
   const addNode = useCallback((type, parentId) => {
-    const newNode = createNode(type);
+    // library_ref: parentId is actually the library entry
+    const newNode = (type === 'library_ref')
+      ? createLibraryRef(parentId)
+      : createNode(type);
+    const explicitParentId = (type === 'library_ref') ? null : parentId;
     setTree(t => {
       // 1. Explicit parent given → insert as child of that node
-      if (parentId) {
-        const par = findNode(t, parentId);
+      if (explicitParentId) {
+        const par = findNode(t, explicitParentId);
         if (par && isGroupType(par.type)) {
-          return insertChild(t, parentId, newNode);
+          return insertChild(t, explicitParentId, newNode);
         }
       }
       // 2. Selected node is a group → insert as child
@@ -1321,8 +1526,8 @@ function App() {
         if (sel && isGroupType(sel.type)) {
           return insertChild(t, selId, newNode);
         }
-        // Selected node is a shape → insert as sibling (child of its parent group)
-        if (sel && SHAPE_TYPES.includes(sel.type)) {
+        // Selected node is a shape/ref → insert as sibling (child of its parent group)
+        if (sel && (SHAPE_TYPES.includes(sel.type) || sel.type === 'library_ref')) {
           const par = findParent(t, selId);
           if (par && isGroupType(par.type)) {
             return insertChild(t, par.id, newNode);
@@ -1520,9 +1725,23 @@ function App() {
           onChange={onProjectFileChosen} style={{ display:'none' }}/>
         <div style={{ width:1, height:20, background:C.border }}/>
         <Btn onClick={()=>setMaterialsOpen(true)} title="Éditer la palette">◆ Matériaux</Btn>
-        <Btn onClick={()=>setExportCode(exportShadertoyPathTraced(tree, palette, bounces, cameraParams))}
+        <Btn onClick={()=>setLibModalOpen(true)} title="Bibliothèque SDF">⊞ Bibliothèque</Btn>
+        <Btn onClick={()=>setExportCode(exportShadertoyPathTraced(tree, palette, bounces, cameraParams, userLibrary))}
           title="Export path-traced multi-pass Shadertoy">↗ Shadertoy</Btn>
       </div>
+
+      {/* ── Library edit mode banner ── */}
+      {editingLibEntry && (
+        <div style={{ background:'#1a2820', borderBottom:`1px solid #44ddcc40`,
+          padding:'5px 14px', display:'flex', alignItems:'center', gap:10, flexShrink:0 }}>
+          <span style={{ color:'#44ddcc', fontSize:11, fontWeight:600 }}>
+            Édition bibliothèque : {userLibrary[editingLibEntry.index]?.label}
+          </span>
+          <span style={{ flex:1 }}/>
+          <Btn onClick={()=>exitLibraryEdit(false)}>Annuler</Btn>
+          <Btn active onClick={()=>exitLibraryEdit(true)}>✓ Terminer</Btn>
+        </div>
+      )}
 
       {/* ── Body ── */}
       <div style={{ flex:1, display:'flex', minHeight:0 }}>
@@ -1543,7 +1762,7 @@ function App() {
                 + Add
               </button>
             )}>
-              {close=><AddMenuContent onAdd={type=>addNode(type,null)} close={close}/>}
+              {close=><AddMenuContent onAdd={addNode} close={close} userLibrary={userLibrary}/>}
             </PopupMenu>
           </div>
 
@@ -1573,22 +1792,43 @@ function App() {
           </div>
 
           {/* Wrap in modifier — op wrappers are pointless on a single node */}
-          {selId && (
-            <div style={{ padding:'8px 10px', borderTop:`1px solid ${C.border}` }}>
-              <div style={{ fontSize:10, color:C.dim, marginBottom:5, textTransform:'uppercase', letterSpacing:'.06em' }}>
-                Encapsuler dans…
-              </div>
-              <div style={{ display:'flex', flexWrap:'wrap', gap:3 }}>
-                {MODIFIER_TYPES.map(t=>(
-                  <button key={t} onClick={()=>wrapNode(selId,t)} title={MODIFIER_LABELS[t]}
-                    style={{ background:'rgba(255,255,255,.05)', color:'#bb88ff', border:`1px solid ${C.border}`,
-                      borderRadius:3, padding:'2px 7px', fontSize:10, cursor:'pointer', fontFamily:'monospace' }}>
-                    {MODIFIER_ICONS[t]} {MODIFIER_LABELS[t]}
+          {selId && (() => {
+            const selN = findNode(tree, selId);
+            const isSelGroup = selN && isGroupType(selN.type);
+            return (
+              <div style={{ padding:'8px 10px', borderTop:`1px solid ${C.border}` }}>
+                <div style={{ fontSize:10, color:C.dim, marginBottom:5, textTransform:'uppercase', letterSpacing:'.06em' }}>
+                  Encapsuler dans…
+                </div>
+                <div style={{ display:'flex', flexWrap:'wrap', gap:3 }}>
+                  {MODIFIER_TYPES.map(t=>(
+                    <button key={t} onClick={()=>wrapNode(selId,t)} title={MODIFIER_LABELS[t]}
+                      style={{ background:'rgba(255,255,255,.05)', color:'#bb88ff', border:`1px solid ${C.border}`,
+                        borderRadius:3, padding:'2px 7px', fontSize:10, cursor:'pointer', fontFamily:'monospace' }}>
+                      {MODIFIER_ICONS[t]} {MODIFIER_LABELS[t]}
+                    </button>
+                  ))}
+                </div>
+                {isSelGroup && !editingLibEntry && (
+                  <button onClick={()=>{
+                    const label = window.prompt('Nom de l\'objet dans la bibliothèque', selN.name || 'Prefab');
+                    if (!label) return;
+                    const entry = libraryEntryFromSubtree(selN, label);
+                    setUserLibrary(lib => [...lib, entry]);
+                    // Replace node in tree with a library_ref
+                    const ref = createLibraryRef(entry);
+                    setTree(t => mapTree(t, n => n.id === selId ? ref : n));
+                    setSelId(ref.id);
+                  }}
+                    style={{ marginTop:6, width:'100%', background:'rgba(68,221,204,.08)',
+                      color:'#44ddcc', border:`1px solid rgba(68,221,204,.3)`,
+                      borderRadius:3, padding:'3px 0', fontSize:10, cursor:'pointer', fontFamily:'inherit' }}>
+                    ⬟ Sauvegarder en bibliothèque
                   </button>
-                ))}
+                )}
               </div>
-            </div>
-          )}
+            );
+          })()}
         </div>
 
         {/* ── Left resize handle ── */}
@@ -1639,6 +1879,15 @@ function App() {
       {exportCode && <ExportModal code={exportCode} onClose={()=>setExportCode(null)}/>}
       {materialsOpen && <MaterialsModal palette={palette} tree={tree}
         onChange={setPalette} onClose={()=>setMaterialsOpen(false)}/>}
+      {libModalOpen && (
+        <LibraryModal
+          userLibrary={userLibrary}
+          onSetUserLibrary={setUserLibrary}
+          onAdd={addNode}
+          onEdit={enterLibraryEdit}
+          onClose={()=>setLibModalOpen(false)}
+        />
+      )}
     </div>
   );
 }
