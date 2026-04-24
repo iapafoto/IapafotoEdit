@@ -8,10 +8,26 @@
 //
 // The compiler is invoked with no selectedId and materialUniforms=false,
 // so everything is baked as literals — no uniforms to wire in Shadertoy.
-function exportShadertoyPathTraced(tree, palette, bounces=2) {
+function exportShadertoyPathTraced(tree, palette, bounces=2, camera=null) {
   const { sceneFn, colorFn, matFn, header, extraFns } =
     compileSDF(tree, null, palette, { materialUniforms: false });
   const B = Math.max(1, Math.min(5, Math.round(bounces)));
+
+  const cam = {
+    theta: typeof camera?.theta === 'number' ? camera.theta : 0.65,
+    phi: typeof camera?.phi === 'number' ? camera.phi : 0.35,
+    distance: typeof camera?.distance === 'number' ? camera.distance : 3.2,
+    focusDistance: typeof camera?.focusDistance === 'number' ? camera.focusDistance : (typeof camera?.distance === 'number' ? camera.distance : 3.2),
+    focalLen: typeof camera?.focalLen === 'number' ? camera.focalLen : 1.0,
+    aperture: typeof camera?.aperture === 'number' ? camera.aperture : 0.0,
+  };
+
+  const th = glslNum(cam.theta, true);
+  const ph = glslNum(cam.phi, true);
+  const dist = glslNum(Math.max(0.3, cam.distance), true);
+  const focusDistance = glslNum(Math.max(0.01, cam.focusDistance), true);
+  const focalLen = glslNum(Math.max(0.05, cam.focalLen), true);
+  const aperture = glslNum(Math.max(0, cam.aperture), true);
 
   const bufferA = `// ============================================================
 // BUFFER A — progressive path tracer
@@ -51,7 +67,7 @@ void camera(inout vec3 ro, inout vec3 rd, float focusDistance, float focalLen, f
     // Aperture bokeh: jitter origin on the lens, re-aim at the focus point.
     float a=6.28318530718*ptHash();
     vec2 lens=aperture*sqrt(ptHash())*vec2(cos(a),sin(a));
-    vec3 focus=ro+rd*focusDistance;
+    vec3 focus=ro+rd*focusDistance/max(dot(rd,ww),1e-4);
     ro+=cam*vec3(lens,0.);
     rd=normalize(focus-ro);
 }
@@ -60,17 +76,14 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord){
     seed_=dot(fragCoord,vec2(12.9898,78.233))+float(iFrame)*1.1973+iTime*.013;
     seed_=fract(sin(seed_)*43758.5453);
 
-    // Orbit camera — theta/phi from mouse, distance constant.
-    vec4 mo=iMouse;
-    float th=3.0 - mo.x/iResolution.x * 6.28318;
-    float ph=0.35 + (mo.y/iResolution.y - .5) * 2.2;
-    ph=clamp(ph,-1.5,1.5);
-    float dist=3.2;
+    float th=${th};
+    float ph=${ph};
+    float dist=${dist};
     vec3 ro=vec3(dist*cos(ph)*sin(th), dist*sin(ph), dist*cos(ph)*cos(th));
 
     vec2 uv=(2.*(fragCoord.xy + vec2(ptHash(),ptHash())-.5)-iResolution.xy)/iResolution.y;
     vec3 rd;
-    camera(ro, rd, dist, 2.8, .1, uv);
+    camera(ro, rd, ${focusDistance}, ${focalLen}, ${aperture}, uv);
 
     vec3 ctot=vec3(0.);
     float refContrib=1.;

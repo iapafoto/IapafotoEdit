@@ -1444,7 +1444,7 @@ function App() {
           onChange={onProjectFileChosen} style={{ display:'none' }}/>
         <div style={{ width:1, height:20, background:C.border }}/>
         <Btn onClick={()=>setMaterialsOpen(true)} title="Éditer la palette">◆ Matériaux</Btn>
-        <Btn onClick={()=>setExportCode(exportShadertoyPathTraced(tree, palette, bounces))}
+        <Btn onClick={()=>setExportCode(exportShadertoyPathTraced(tree, palette, bounces, camera))}
           title="Export path-traced multi-pass Shadertoy">↗ Shadertoy</Btn>
       </div>
 
