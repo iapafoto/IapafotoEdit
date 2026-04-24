@@ -394,7 +394,7 @@ function TreeItem({ node, depth, selectedId, isRoot, onSelect, onAdd, onDelete, 
 }
 
 // ── Properties Panel ──────────────────────────────────────────────
-function PropsPanel({ node, onChange, palette, tree, isRoot, onOpenMaterials }) {
+function PropsPanel({ node, onChange, palette, tree, isRoot, onOpenMaterials, userLibrary, onEditLibrary }) {
   if (!node) return (
     <div style={{ padding:16, color:C.dim, fontSize:11, textAlign:'center', paddingTop:40, lineHeight:1.7 }}>
       Sélectionnez un objet<br/>pour éditer ses propriétés
@@ -492,6 +492,38 @@ function PropsPanel({ node, onChange, palette, tree, isRoot, onOpenMaterials }) 
           <ShapeParams node={node} updP={updP}/>
         </div>
       )}
+      {node.type === 'library_ref' && (() => {
+        const entry = (userLibrary || []).find(e => e.id === node.libraryId);
+        if (!entry) return (
+          <div style={{ marginBottom:12, padding:8, background:'rgba(255,60,80,.08)',
+            border:`1px solid rgba(255,60,80,.3)`, borderRadius:3, fontSize:10, color:'#ff8899' }}>
+            Entrée bibliothèque introuvable ({node.libraryId})
+          </div>
+        );
+        return (
+          <div style={{ marginBottom:12 }}>
+            <SecTitle>Bibliothèque · {entry.label}</SecTitle>
+            {(entry.params || []).map(p => {
+              const val = (node.params || {})[p.key];
+              if (p.type === 'vec3') {
+                return <Vec3Row key={p.key} label={p.label}
+                  value={val || p.default || [0,0,0]}
+                  onChange={v=>updP(p.key, v)} step={p.step||0.01}/>;
+              }
+              return <PR key={p.key} label={p.label}
+                v={val ?? p.default ?? 0}
+                onChange={v=>updP(p.key, v)}
+                step={p.step||0.01} min={p.min}/>;
+            })}
+            <button onClick={()=>onEditLibrary && onEditLibrary(entry)}
+              style={{ marginTop:6, width:'100%', background:'rgba(68,221,204,.08)',
+                color:'#44ddcc', border:`1px solid rgba(68,221,204,.3)`,
+                borderRadius:3, padding:'3px 0', fontSize:10, cursor:'pointer', fontFamily:'inherit' }}>
+              ⬟ Éditer dans bibliothèque
+            </button>
+          </div>
+        );
+      })()}
       {(isShape || isOp || isMod || node.type === 'library_ref') && (
         <div style={{ marginBottom:12 }}>
           <SecTitle>{isShape || node.type === 'library_ref' ? 'Transform' : 'Group Transform'}</SecTitle>
@@ -1872,7 +1904,14 @@ function App() {
             palette={palette}
             tree={tree}
             isRoot={selNode && selNode.id === tree.id}
-            onOpenMaterials={()=>setMaterialsOpen(true)} />
+            onOpenMaterials={()=>setMaterialsOpen(true)}
+            userLibrary={userLibrary}
+            onEditLibrary={entry=>{
+              const idx = userLibrary.findIndex(e => e.id === entry.id);
+              if (idx < 0) return;
+              if (entry.source === 'subtree') enterLibraryEdit(idx);
+              else setLibModalOpen(true);
+            }} />
         </div>
       </div>
 
