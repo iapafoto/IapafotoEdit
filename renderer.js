@@ -3,45 +3,43 @@
 // ================================================================
 // WEBGL SHADERS (boilerplate + uniforms)
 // ================================================================
-// GLSL ES 3.00 (WebGL2) — enables the ZERO loop-index trick, bitwise ops,
-// and the same dialect Shadertoy uses, so PT_HELPERS_SRC is shared verbatim.
 const VERT_SRC = `#version 300 es
 in vec2 aPos; void main(){gl_Position=vec4(aPos,0.,1.);}`;
 
-// Fragment shader header — declares the editor-specific uniforms.
-// Primitive SDFs + transforms come from compileSDF's `header` output.
 const FRAG_HEADER = `#version 300 es
 precision highp float;
 out vec4 fragColor;
 uniform vec2  u_res;
 uniform vec3  u_camPos, u_camFwd, u_camRight, u_camUp;
+uniform float u_camFocusDistance;
+uniform float u_camFocalLen;
+uniform float u_camAperture;
 uniform float u_selMat;
 uniform float u_time;
-// Selected-node uniforms — live-editing without shader recompile.
 uniform vec3  u_selPos;
 uniform vec3  u_selRot;
-uniform float u_selScale;       // uniform scalar (Phase 2)
-uniform vec4  u_selParams;      // first 4 scalar params of selected node
-uniform vec4  u_selParams2;     // next 4 (or overflow for modifiers)
-uniform vec4  u_selParams3;     // capsule b endpoint / bezier p1
-uniform vec4  u_selParams4;     // bezier p2
-uniform float u_selK;           // smooth-op blend factor
+uniform float u_selScale;
+uniform vec4  u_selParams;
+uniform vec4  u_selParams2;
+uniform vec4  u_selParams3;
+uniform vec4  u_selParams4;
+uniform float u_selK;
 `;
 
-// u_frame is a float (used as a weight in accumulation); cast to int for
-// ZERO so the driver keeps the loop rolled — big compile-time win on
-// complex SDFs. Any use-site including PT_HELPERS_SRC must define ZERO.
 const FRAG_PT_EXTRA = `uniform sampler2D u_accum;
 uniform float u_frame;
 #define ZERO (int(min(u_frame,0.0)))
 `;
 
-// Path tracer helpers. Shared verbatim with exporter.js (Shadertoy target),
-// so no renderer-specific uniforms here. ZERO must be defined upstream.
-// Assumes sceneMap/shapeCol/shapeMat are in scope.
 const PT_HELPERS_SRC = `
 float seed_;
 float ptHash(){ seed_=fract(sin(seed_*12.9898+78.233)*43758.5453); return seed_; }
+
+vec2 ptDisk(){
+    float a=6.28318530718*ptHash();
+    float r=sqrt(ptHash());
+    return vec2(cos(a),sin(a))*r;
+}
 
 vec3 envMap(vec3 rd){
     float t=clamp(rd.y*.5+.5,0.,1.);
@@ -52,8 +50,6 @@ vec3 envMap(vec3 rd){
     return sky+vec3(1.5,1.3,.9)*sun*6.;
 }
 
-// Tetrahedron normal. Loop-form uses ZERO so the driver won't unroll —
-// saves compile time on complex SDFs. Requires GLSL ES 3.00 (bitshifts + ZERO).
 vec3 calcNormal(vec3 p){
     vec3 n = vec3(0);
     for(int i=ZERO; i<4; i++) {
@@ -120,9 +116,16 @@ void main(){
     seed_=dot(gl_FragCoord.xy,vec2(12.9898,78.233))+u_frame*1.1973+u_time*.013;
     seed_=fract(sin(seed_)*43758.5453);
     vec2 uv=(gl_FragCoord.xy-u_res*.5)/u_res.y;
-    uv+=(vec2(ptHash(),ptHash())-.5)/u_res.y;
+    uv=((vec2(ptHash(),ptHash())-.5)+gl_FragCoord.xy-u_res*.5)/u_res.y;
+
     vec3 ro=u_camPos;
-    vec3 rd=normalize(u_camFwd+uv.x*u_camRight+uv.y*u_camUp);
+    vec3 rd=normalize(u_camFwd*u_camFocalLen + uv.x*u_camRight + uv.y*u_camUp);
+
+    float focusT=max(.01,u_camFocusDistance/max(dot(rd,u_camFwd),1e-4));
+    vec3 focusPos=ro+rd*focusT;
+    vec2 lens=ptDisk()*u_camAperture;
+    ro += u_camRight*lens.x + u_camUp*lens.y;
+    rd = normalize(focusPos-ro);
 
     vec3 ctot=vec3(0.);
     float refContrib=1.;
@@ -148,7 +151,6 @@ void main(){
         if(dot(rd,nor)<=0.) break;
     }
 
-    // Gold-tint the selected shape (u_selMat holds its material index).
     if(firstHitMat>=0. && u_selMat>=0. && abs(firstHitMat-u_selMat)<.5){
         ctot=mix(ctot, ctot*.5+vec3(1.,.85,.25)*.5, .35);
     }
@@ -171,10 +173,6 @@ void main(){
     fragColor=vec4(col,1.);
 }`;
 
-// ================================================================
-// WEBGL RENDERER
-// ================================================================
-// Two-pass ping-pong: trace → progressive float FBO; present → gamma+vignette.
 class SDFRenderer {
   constructor(canvas) {
     this.canvas = canvas;
@@ -187,15 +185,22 @@ class SDFRenderer {
     this._initFloatFormat();
     this._animId = null;
     this._onFrame = null;
-    this.camera = { theta: 0.6, phi: 0.35, distance: 3.2 };
+    this.camera = {
+      theta: 0.6,
+      phi: 0.35,
+      distance: 3.2,
+      focusDistance: 3.2,
+      focalLen: 1.0,
+      aperture: 0.0,
+    };
     this.selMat = -1;
     this.selectedId = null;
     this.selData = null;
-    this.selType = null;  // cached to pick the right registry entry for uniformPack
+    this.selType = null;
     this.palette = DEFAULT_PALETTE;
     this._matCount = 0;
-    this._matColArr = null; // Float32Array(3*N) → u_matCol[]
-    this._matMatArr = null; // Float32Array(4*N) → u_matMat[]
+    this._matColArr = null;
+    this._matMatArr = null;
     this.bounces   = 2;
     this.maxAccum  = 1024;
     this._lastTree = null;
@@ -210,8 +215,6 @@ class SDFRenderer {
 
   _initFloatFormat() {
     const gl = this.gl;
-    // WebGL2: EXT_color_buffer_float enables RGBA32F render targets
-    // (and implicitly RGBA16F). Fall back to half, then to byte.
     if (gl.getExtension('EXT_color_buffer_float')) {
       this._texInternal = gl.RGBA32F;
       this._texType = gl.FLOAT;
@@ -247,8 +250,6 @@ class SDFRenderer {
     }
   }
 
-  // Pack selected-node params into u_selParams / u_selParams2 / _3 / _4.
-  // Shapes: registry uniformPack. Modifiers: inline packing.
   _packSelUniforms(node) {
     const out = { params:[0,0,0,0], params2:[0,0,0,0], params3:[0,0,0,0], params4:[0,0,0,0] };
     const p = node.params || {};
@@ -306,7 +307,6 @@ class SDFRenderer {
     if (prog) this._progPresent = prog;
   }
 
-  // Pack material list (deduplicated) → Float32Arrays uploaded each frame.
   _packMaterials(materials) {
     const N = materials.length;
     const cols = new Float32Array(N * 3);
@@ -324,8 +324,6 @@ class SDFRenderer {
     return { cols, mats };
   }
 
-  // Fast path: no shader recompile. If the deduplicated material count
-  // stayed the same, just push new arrays; otherwise fall back to recompile.
   updateMaterials(tree, palette) {
     const pal = (palette && palette.length) ? palette : DEFAULT_PALETTE;
     this.palette = pal;
@@ -382,7 +380,7 @@ class SDFRenderer {
   _stateSig() {
     const c = this.camera, d = this.selData;
     const ds = d ? JSON.stringify([d.position, d.rotation, d.scale, d.params, d.type]) : '';
-    return `${c.theta}|${c.phi}|${c.distance}|${this.selMat}|${this.selectedId||''}|${ds}|${this.bounces}`;
+    return `${c.theta}|${c.phi}|${c.distance}|${c.focusDistance}|${c.focalLen}|${c.aperture}|${this.selMat}|${this.selectedId||''}|${ds}|${this.bounces}`;
   }
 
   _createFBO(w, h) {
@@ -444,6 +442,9 @@ class SDFRenderer {
     u('u_camFwd','uniform3fv',fwd);
     u('u_camRight','uniform3fv',right);
     u('u_camUp','uniform3fv',up);
+    u('u_camFocusDistance','uniform1f',Math.max(0.01, this.camera.focusDistance || this.camera.distance || 3.2));
+    u('u_camFocalLen','uniform1f',Math.max(0.05, this.camera.focalLen || 1.0));
+    u('u_camAperture','uniform1f',Math.max(0, this.camera.aperture || 0));
     u('u_selMat','uniform1f',this.selMat);
     u('u_time','uniform1f',performance.now()/1000);
     if (this._matCount > 0 && this._matColArr && this._matMatArr) {
@@ -484,12 +485,13 @@ class SDFRenderer {
 
   projectToScreen(p, w, h) {
     const { eye, fwd, right, up } = this.getCamVecs();
+    const focalLen = Math.max(0.05, this.camera.focalLen || 1.0);
     const v = sub3(p, eye);
     const vf = dot3(v, fwd);
     if (vf <= 0.01) return null;
     const vr = dot3(v, right);
     const vu = dot3(v, up);
-    return { x: vr/vf * h + w/2, y: h/2 - vu/vf * h, depth: vf };
+    return { x: vr/vf * h * focalLen + w/2, y: h/2 - vu/vf * h * focalLen, depth: vf };
   }
 
   render() {

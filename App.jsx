@@ -33,6 +33,25 @@ const C = {
 const rad = d => d * Math.PI / 180;
 const deg = r => r * 180 / Math.PI;
 const clamp = (v,a,b) => Math.max(a, Math.min(b, v));
+const DEFAULT_CAMERA = {
+  theta: 0.65,
+  phi: 0.35,
+  distance: 3.2,
+  focusDistance: 3.2,
+  focalLen: 1.0,
+  aperture: 0.0,
+};
+function sanitizeCamera(cam) {
+  const c = { ...DEFAULT_CAMERA, ...(cam || {}) };
+  return {
+    theta: typeof c.theta === 'number' ? c.theta : DEFAULT_CAMERA.theta,
+    phi: typeof c.phi === 'number' ? c.phi : DEFAULT_CAMERA.phi,
+    distance: typeof c.distance === 'number' ? c.distance : DEFAULT_CAMERA.distance,
+    focusDistance: Math.max(0.01, typeof c.focusDistance === 'number' ? c.focusDistance : c.distance || DEFAULT_CAMERA.focusDistance),
+    focalLen: Math.max(0.05, typeof c.focalLen === 'number' ? c.focalLen : DEFAULT_CAMERA.focalLen),
+    aperture: Math.max(0, typeof c.aperture === 'number' ? c.aperture : DEFAULT_CAMERA.aperture),
+  };
+}
 
 // ── Color helpers (rgb[0..1] ↔ #rrggbb) ──────────────────────────
 const rgbToHex = rgb => '#' + rgb.map(c => {
@@ -73,10 +92,11 @@ function getCamVecs(cam) {
 }
 function projectPt(p, cam, w, h) {
   const { eye, fwd, right, up } = getCamVecs(cam);
+  const focalLen = Math.max(0.05, cam?.focalLen || 1.0);
   const v = sub3(p, eye);
   const vf = dot3(v, fwd);
   if (vf <= 0.01) return null;
-  return { x: dot3(v,right)/vf*h + w/2, y: h/2 - dot3(v,up)/vf*h, depth: vf };
+  return { x: dot3(v,right)/vf*h*focalLen + w/2, y: h/2 - dot3(v,up)/vf*h*focalLen, depth: vf };
 }
 
 // ── Btn ───────────────────────────────────────────────────────────
@@ -409,10 +429,6 @@ function PropsPanel({ node, onChange, palette, tree, isRoot, onOpenMaterials }) 
             borderRadius:3, padding:'3px 6px', color:C.text, fontSize:11, fontFamily:'inherit' }} />
       </div>
 
-      {/* Material picker — cascade aware. Available on shapes AND groups so
-          setting a material on a group propagates to descendants without
-          their own materialId. Root hides the "Inherit" option (nothing to
-          inherit from). */}
       <div style={{ marginBottom:12 }}>
         <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:3 }}>
           <span style={{ fontSize:10, color:C.dim, textTransform:'uppercase', letterSpacing:'.06em' }}>Matériau</span>
@@ -493,7 +509,6 @@ function PropsPanel({ node, onChange, palette, tree, isRoot, onOpenMaterials }) 
         </div>
       )}
 
-      {/* Phase 6 — free-form GLSL snippets for domain/distance warping. */}
       <Collapsible title="Advanced (GLSL)">
         <GlslInput label="pTransform(p) → vec3"
           value={node.pTransform || ''}
@@ -531,8 +546,6 @@ function ShapeParams({ node, updP }) {
             rows={2}
             onChange={v=>updP(p.key, v)}/>;
         }
-        // 'number' (default). Pass min only if explicitly set by registry
-        // — plane offset, etc. need unbounded negatives.
         return <PR key={p.key} label={p.label}
           v={params[p.key]||0}
           onChange={v=>updP(p.key, v)}
@@ -585,7 +598,6 @@ function ModifierParams({ node, updP }) {
     );
   }
   if (node.type === 'repeat') {
-    // Per-axis: cell size (s) + half-count (n). n=0 disables repetition on that axis.
     const row = (axisKey, color) => (
       <div key={axisKey} style={{ display:'flex', alignItems:'center', gap:4, marginBottom:4 }}>
         <span style={{ width:14, fontSize:10, fontWeight:700, color, flexShrink:0 }}>{axisKey.toUpperCase()}</span>
@@ -634,8 +646,6 @@ const AXES = [
   { id:'z', dir:[0,0,1], col:C.Z, label:'Z' },
 ];
 
-// Shape-specific control points (local coords). Returned in draw order.
-// Colors rotate through X/Y/Z so the first handle is pink, second green, etc.
 function getControlPoints(node) {
   if (!node) return [];
   const p = node.params || {};
@@ -659,7 +669,6 @@ function getControlPoints(node) {
 function drawGizmo(ctx, selNode, ancestors, mode, activeAxis, cam, w, h) {
   ctx.clearRect(0,0,w,h);
   if (!selNode) return;
-  // Gizmo origin = shape's actual world position (chains ancestor transforms).
   const worldOrigin = worldPointChain(ancestors, selNode, [0,0,0]);
   const origin = projectPt(worldOrigin, cam, w, h);
   if (!origin || origin.depth < 0.01) return;
@@ -706,8 +715,6 @@ function drawGizmo(ctx, selNode, ancestors, mode, activeAxis, cam, w, h) {
   ctx.fillStyle='#ffffff';
   ctx.beginPath(); ctx.arc(origin.x,origin.y,3.5,0,Math.PI*2); ctx.fill();
 
-  // Control-point handles for capsule/bezier. Drawn after the axes so they
-  // stay on top; guideline connects them visually (segment / bezier curve).
   const cps = getControlPoints(selNode);
   if (cps.length) {
     const cpGLen = gLen * 0.6;
@@ -715,7 +722,6 @@ function drawGizmo(ctx, selNode, ancestors, mode, activeAxis, cam, w, h) {
       const world = worldPointChain(ancestors, selNode, cp.pos);
       return { ...cp, world, screen: projectPt(world, cam, w, h) };
     }).filter(c => c.screen);
-    // Polyline connector
     if (screened.length >= 2) {
       ctx.globalAlpha = 0.55;
       ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 1.2;
@@ -733,7 +739,6 @@ function drawGizmo(ctx, selNode, ancestors, mode, activeAxis, cam, w, h) {
       ctx.setLineDash([]);
       ctx.globalAlpha = 1;
     }
-    // Mini XYZ axis arrows on each control point (drawn before dots so dots stay on top)
     for (const cp of screened) {
       const cpAxes = AXES.map(ax => ({
         ...ax, end: projectPt(add3(cp.world, scale3(ax.dir, cpGLen)), cam, w, h),
@@ -759,7 +764,6 @@ function drawGizmo(ctx, selNode, ancestors, mode, activeAxis, cam, w, h) {
       }
       ctx.globalAlpha = 1;
     }
-    // CP dots (drawn last so they sit on top of axis lines)
     for (const cp of screened) {
       const activeDot = activeAxis === `cp:${cp.key}` || activeAxis?.startsWith(`cp:${cp.key}:`);
       const { x, y } = cp.screen;
@@ -776,8 +780,6 @@ function drawGizmo(ctx, selNode, ancestors, mode, activeAxis, cam, w, h) {
   }
 }
 
-// Projects a 2D mouse delta onto a world-space axis, returns the scalar movement.
-// Used by both shape translate and CP axis drag.
 function dragAxisDelta(dx, dy, axDir, right, up, scale) {
   return (dx * dot3(axDir, right) - dy * dot3(axDir, up)) * scale;
 }
@@ -785,7 +787,6 @@ function dragAxisDelta(dx, dy, axDir, right, up, scale) {
 function hitTestGizmo(mx, my, selNode, ancestors, mode, cam, w, h) {
   if (!selNode) return null;
   const cps = getControlPoints(selNode);
-  // CP center dots first — exact 10px hit, highest priority.
   for (const cp of cps) {
     const s = projectPt(worldPointChain(ancestors, selNode, cp.pos), cam, w, h);
     if (!s) continue;
@@ -796,7 +797,6 @@ function hitTestGizmo(mx, my, selNode, ancestors, mode, cam, w, h) {
   const gLen = clamp(0.55*cam.distance/3,0.18,1.6);
   const cpGLen = gLen * 0.6;
   let best=null, bestD=12;
-  // CP axis arrows — compete with shape axes by proximity.
   for (const cp of cps) {
     const cpWorld = worldPointChain(ancestors, selNode, cp.pos);
     const cpScreen = projectPt(cpWorld, cam, w, h);
@@ -812,7 +812,6 @@ function hitTestGizmo(mx, my, selNode, ancestors, mode, cam, w, h) {
       if (d<bestD) { bestD=d; best=`cp:${cp.key}:${ax.id}`; }
     }
   }
-  // Shape axes.
   if (!origin) return best;
   for (const ax of AXES) {
     const end = projectPt(add3(worldOrigin,scale3(ax.dir,gLen)),cam,w,h);
@@ -833,10 +832,6 @@ function hitTestGizmo(mx, my, selNode, ancestors, mode, cam, w, h) {
   return best;
 }
 
-// ── Materials Modal ───────────────────────────────────────────────
-// Palette editor: add, rename, recolor, tune reflection/roughness/spec.
-// Deleting a material is disabled if any node still references it
-// (tooltip reports the usage count); clear those assignments first.
 function MaterialsModal({ palette, tree, onChange, onClose }) {
   const update = (id, patch) =>
     onChange(palette.map(m => m.id === id ? { ...m, ...patch } : m));
@@ -919,7 +914,6 @@ function MaterialsModal({ palette, tree, onChange, onClose }) {
   );
 }
 
-// ── Export Modal ──────────────────────────────────────────────────
 function ExportModal({ code, onClose }) {
   const [copied, setCopied] = useState(false);
   return (
@@ -950,7 +944,6 @@ function ExportModal({ code, onClose }) {
   );
 }
 
-// ── Resize handle (vertical divider, col-resize) ─────────────────
 function ResizeHandle({ onMouseDown }) {
   const [hov, setHov] = useState(false);
   return (
@@ -961,23 +954,21 @@ function ResizeHandle({ onMouseDown }) {
   );
 }
 
-// ── Toolbar mode buttons ──────────────────────────────────────────
 const MODES = [
   { id:'translate', icon:'⊹', label:'Move (G)' },
   { id:'rotate',    icon:'↻', label:'Rotate (R)' },
   { id:'scale',     icon:'⤡', label:'Scale (S)' },
 ];
 
-// ── Main App ──────────────────────────────────────────────────────
 function App() {
   const _initProj = readAutosaveOnce();
   const [tree,       setTree]       = useState(() => _initProj?.tree || createDefaultScene());
   const [selId,      setSelId]      = useState(null);
   const [mode,       setMode]       = useState('translate');
-  const [camera,     setCamera]     = useState(() => _initProj?.camera || { theta:0.65, phi:0.35, distance:3.2 });
+  const [camera,     setCamera]     = useState(() => sanitizeCamera(_initProj?.camera));
   const [exportCode, setExportCode] = useState(null);
   const [hoverAxis,  setHoverAxis]  = useState(null);
-  const [dropTarget, setDropTarget] = useState(null);  // { id, mode } | null
+  const [dropTarget, setDropTarget] = useState(null);
   const [leftW,      setLeftW]      = useState(235);
   const [rightW,     setRightW]     = useState(230);
   const [palette,      setPalette]      = useState(() => _initProj?.palette || DEFAULT_PALETTE);
@@ -999,31 +990,26 @@ function App() {
   const rendererRef   = useRef(null);
   const glCanvasRef   = useRef(null);
   const gizmoCanvasRef= useRef(null);
-  const vpDragRef     = useRef(null);   // viewport mouse drag (camera / gizmo)
-  const treeDragId    = useRef(null);   // tree drag-and-drop
+  const vpDragRef     = useRef(null);
+  const treeDragId    = useRef(null);
   const cameraRef     = useRef(camera);
-  const fastPathRef   = useRef(false);  // last update touched only selected shape
+  const fastPathRef   = useRef(false);
   const prevSelIdRef  = useRef(null);
   useEffect(()=>{ cameraRef.current = camera; }, [camera]);
 
-  // ── Undo / Redo ──────────────────────────────────────────────────
-  // Snapshots of { tree, palette } — selection isn't tracked (it's a view
-  // concern). History is debounced: during a drag we push only the state
-  // BEFORE the drag started, then wait 400ms of quiet before committing.
-  // That way a continuous NumInput/gizmo drag is a single undo step.
   const historyRef = useRef({
     past: [], future: [],
-    lastCommitted: null,    // last state pushed (or baseline)
-    pending: null,          // state to push when debounce fires
+    lastCommitted: null,
+    pending: null,
     debounce: null,
-    suppress: false,        // true during undo/redo itself
+    suppress: false,
     initialized: false,
   });
   const treeRef    = useRef(tree);
   const paletteRef = useRef(palette);
   useEffect(()=>{ treeRef.current = tree; }, [tree]);
   useEffect(()=>{ paletteRef.current = palette; }, [palette]);
-  const [historyTick, setHistoryTick] = useState(0); // force re-render for buttons
+  const [historyTick, setHistoryTick] = useState(0);
 
   const commitPending = () => {
     const h = historyRef.current;
@@ -1044,7 +1030,6 @@ function App() {
       return;
     }
     if (h.suppress) { h.suppress = false; return; }
-    // First change in a burst — snapshot the PRE-change state.
     if (!h.pending) h.pending = h.lastCommitted;
     if (h.debounce) clearTimeout(h.debounce);
     h.debounce = setTimeout(commitPending, 400);
@@ -1053,7 +1038,7 @@ function App() {
   const undo = useCallback(()=>{
     const h = historyRef.current;
     if (h.debounce) { clearTimeout(h.debounce); h.debounce = null; }
-    commitPending(); // flush in-flight edit so undo goes to start-of-burst
+    commitPending();
     if (!h.past.length) return;
     const prev = h.past.pop();
     h.future.push(h.lastCommitted || { tree:treeRef.current, palette:paletteRef.current });
@@ -1081,11 +1066,6 @@ function App() {
   const canUndo = historyRef.current.past.length > 0;
   const canRedo = historyRef.current.future.length > 0;
 
-  // ── Save / Load / New ────────────────────────────────────────
-  // Save: download JSON of current tree+palette+camera+bounces.
-  // Load: JSON file picker; pushes current state to undo-history so it's recoverable.
-  // New:  reset to default scene; clears history.
-  // Autosave: localStorage, debounced 800ms on tree/palette/camera/bounces.
   const bouncesRef = useRef(bounces);
   useEffect(()=>{ bouncesRef.current = bounces; }, [bounces]);
 
@@ -1105,7 +1085,7 @@ function App() {
   const applyLoadedProject = useCallback((p, { undoable = true } = {}) => {
     const h = historyRef.current;
     if (h.debounce) { clearTimeout(h.debounce); h.debounce = null; }
-    if (h.pending) { // flush any in-flight edit
+    if (h.pending) {
       h.past.push(h.pending); h.pending = null;
       if (h.past.length > 200) h.past.shift();
     }
@@ -1120,7 +1100,7 @@ function App() {
     h.suppress = true;
     setTree(p.tree);
     setPalette(p.palette);
-    if (p.camera) setCamera(p.camera);
+    if (p.camera) setCamera(sanitizeCamera(p.camera));
     if (typeof p.bounces === 'number') setBounces(clamp(Math.round(p.bounces), 1, 5));
     setSelId(null);
     setHistoryTick(t => t + 1);
@@ -1132,7 +1112,7 @@ function App() {
 
   const onProjectFileChosen = useCallback((e) => {
     const file = e.target.files && e.target.files[0];
-    e.target.value = ''; // allow re-selecting the same file later
+    e.target.value = '';
     if (!file) return;
     const r = new FileReader();
     r.onload = ev => {
@@ -1150,12 +1130,11 @@ function App() {
   const newProject = useCallback(() => {
     if (!window.confirm('Nouvelle scène ? Les changements non sauvegardés seront perdus.')) return;
     applyLoadedProject(
-      { tree: createDefaultScene(), palette: DEFAULT_PALETTE, camera: { theta:0.65, phi:0.35, distance:3.2 }, bounces: 2 },
+      { tree: createDefaultScene(), palette: DEFAULT_PALETTE, camera: DEFAULT_CAMERA, bounces: 2 },
       { undoable: false }
     );
   }, [applyLoadedProject]);
 
-  // Autosave (debounced)
   useEffect(() => {
     const t = setTimeout(() => {
       try {
@@ -1167,24 +1146,17 @@ function App() {
   }, [tree, palette, camera, bounces]);
 
   const selNode = useMemo(()=> selId ? findNode(tree, selId) : null, [tree, selId]);
-  // Ancestor chain of the selected node — lets the gizmo match the compiled transform stack.
   const selAncestors = useMemo(
     () => (selId ? (getAncestors(tree, selId) || []) : []),
     [tree, selId]
   );
 
-  // Boot renderer
   useEffect(()=>{
     const r = new SDFRenderer(glCanvasRef.current);
     rendererRef.current = r;
     return ()=>r.destroy();
   }, []);
 
-  // Sync renderer with tree/selection/palette. Two fast paths avoid the
-  // shader recompile:
-  //  1. `fastPathRef` — only the selected node's live uniforms changed.
-  //  2. palette-only change — push `u_matCol[]`/`u_matMat[]` uniforms,
-  //     no structural edits → keeps color-picker drags at 60 fps.
   const prevPaletteRef = useRef(palette);
   const prevTreeRef    = useRef(tree);
   useEffect(()=>{
@@ -1209,27 +1181,19 @@ function App() {
     r.updateScene(tree, palette);
   }, [tree, selId, palette]);
 
-  // Selection highlight — disabled. Phase 1 switched shapeCol/shapeMat to
-  // material IDs, so the shader's `firstHitMat` no longer identifies a
-  // single shape. The gizmo + tree highlight already make the selection
-  // obvious; skipping the shader-side tint removes a recompile bump.
   useEffect(()=>{
     const r = rendererRef.current;
     if (r) r.selMat = -1;
   }, [selId, tree]);
 
-  // Sync camera
   useEffect(()=>{
-    if (rendererRef.current) rendererRef.current.camera = {...camera};
+    if (rendererRef.current) rendererRef.current.camera = sanitizeCamera(camera);
   }, [camera]);
 
-  // Bounces recompiles the shader (BOUNCE is baked as a #define) and resets
-  // the accumulator — handled internally by setBounces.
   useEffect(()=>{
     if (rendererRef.current) rendererRef.current.setBounces(bounces);
   }, [bounces]);
 
-  // Draw gizmo every frame
   useEffect(()=>{
     const cvs = gizmoCanvasRef.current; if(!cvs) return;
     const ctx = cvs.getContext('2d');
@@ -1238,11 +1202,8 @@ function App() {
     drawGizmo(ctx, selNode, selAncestors, mode, hoverAxis, camera, w, h);
   });
 
-  // Keyboard shortcuts
   useEffect(()=>{
     const h = e => {
-      // Any form control steals our shortcuts — including TEXTAREA used by
-      // the Advanced GLSL inputs (pTransform/dTransform/profile).
       const tag = e.target.tagName;
       if (tag==='INPUT'||tag==='SELECT'||tag==='TEXTAREA'||e.target.isContentEditable) return;
       const mod = e.ctrlKey || e.metaKey;
@@ -1264,15 +1225,7 @@ function App() {
     return ()=>window.removeEventListener('keydown',h);
   }, [selId]);
 
-  // ── Tree operations ──────────────────────────────────────────────
   const updateNode = useCallback((id, updates) => {
-    // Fast path marker: the selected node's transform / shape params are
-    // bound to uniforms, so changes to them don't need a shader recompile.
-    // Skip the marker for:
-    //   - structural updates (type/children/materialId)
-    //   - GLSL text fields (pTransform/dTransform, params.profile) which
-    //     are inlined into the shader
-    //   - repeat_angular.axis which is baked as GLSL swizzles
     const hasStructural = 'type' in updates || 'children' in updates || 'materialId' in updates;
     const hasGlslText   = 'pTransform' in updates || 'dTransform' in updates
                        || (updates.params && 'profile' in updates.params);
@@ -1291,24 +1244,20 @@ function App() {
     setSelId(s => s===id ? null : s);
   }, []);
 
-  // addNode: type = shape or op, parentId = explicit parent (optional)
   const addNode = useCallback((type, parentId) => {
     const newNode = createNode(type);
     setTree(t => {
-      // 1. Explicit parent given → insert as child of that node
       if (parentId) {
         const par = findNode(t, parentId);
         if (par && isGroupType(par.type)) {
           return insertChild(t, parentId, newNode);
         }
       }
-      // 2. Selected node is a group → insert as child
       if (selId) {
         const sel = findNode(t, selId);
         if (sel && isGroupType(sel.type)) {
           return insertChild(t, selId, newNode);
         }
-        // Selected node is a shape → insert as sibling (child of its parent group)
         if (sel && SHAPE_TYPES.includes(sel.type)) {
           const par = findParent(t, selId);
           if (par && isGroupType(par.type)) {
@@ -1316,11 +1265,9 @@ function App() {
           }
         }
       }
-      // 3. Root is a group → insert at root level
       if (isGroupType(t.type)) {
         return insertChild(t, t.id, newNode);
       }
-      // 4. Fallback: wrap root + new in a union
       const wrapper = createNode('union');
       wrapper.children = [t, newNode];
       return wrapper;
@@ -1339,7 +1286,6 @@ function App() {
     }));
   }, []);
 
-  // ── Viewport mouse handling ──────────────────────────────────────
   const handleMouseDown = useCallback((e) => {
     const cvs = gizmoCanvasRef.current;
     const rect = cvs.getBoundingClientRect();
@@ -1349,11 +1295,9 @@ function App() {
     if (hit && selNode) {
       e.preventDefault();
       if (hit.startsWith('cp:')) {
-        // Control-point drag (capsule A/B, bezier P0/P1/P2).
-        // Hit format: 'cp:<key>' for free drag, 'cp:<key>:<axis>' for constrained.
         const parts = hit.split(':');
         const key = parts[1];
-        const cpAxis = parts[2] || null;  // 'x'|'y'|'z' or null for free drag
+        const cpAxis = parts[2] || null;
         const localCp = [...(selNode.params?.[key] || [0,0,0])];
         const worldCp = worldPointChain(selAncestors, selNode, localCp);
         const screen = projectPt(worldCp, cameraRef.current, w, h);
@@ -1390,7 +1334,6 @@ function App() {
   const handleMouseMove = useCallback((e) => {
     const d = vpDragRef.current;
     if (!d) {
-      // Hover detection
       const cvs=gizmoCanvasRef.current; if(!cvs) return;
       const rect=cvs.getBoundingClientRect();
       setHoverAxis(hitTestGizmo(e.clientX-rect.left, e.clientY-rect.top, selNode, selAncestors, mode, cameraRef.current, rect.width, rect.height));
@@ -1398,7 +1341,8 @@ function App() {
     }
     if (d.type==='camera') {
       const dx=e.clientX-d.startMouse[0], dy=e.clientY-d.startMouse[1];
-      setCamera(c=>({...c,
+      setCamera(c=>sanitizeCamera({
+        ...c,
         theta:d.startTheta-dx*0.006,
         phi:clamp(d.startPhi+dy*0.006,-Math.PI/2+0.05,Math.PI/2-0.05),
       }));
@@ -1408,8 +1352,6 @@ function App() {
       const dx=e.clientX-d.startMouse[0], dy=e.clientY-d.startMouse[1];
       const axDir=d.axis==='x'?[1,0,0]:d.axis==='y'?[0,1,0]:[0,0,1];
       if (mode==='translate') {
-        // Drag produces a world-space delta; project back into the parent frame
-        // (where selNode.position lives) by peeling off every ancestor's transform.
         const delta=dragAxisDelta(dx,dy,axDir,right,up,cam.distance/d.h);
         const worldD=scale3(axDir,delta);
         const parentD=ancestorsInverseDelta(d.ancestors, worldD);
@@ -1424,9 +1366,6 @@ function App() {
         updateNode(d.nodeId,{scale:Math.max(0.01, d.startSc*factor)});
       }
     } else if (d.type==='cp') {
-      // Control-point drag: either free (camera-plane) or axis-constrained.
-      // World delta is inverted through the FULL ancestor chain + node transform
-      // to get the delta in the node's local frame (where cp.pos is stored).
       const cam=cameraRef.current;
       const {right,up}=getCamVecs(cam);
       const dx=e.clientX-d.startMouse[0], dy=e.clientY-d.startMouse[1];
@@ -1455,16 +1394,15 @@ function App() {
   const handleMouseUp = useCallback(()=>{ vpDragRef.current=null; }, []);
   const handleWheel = useCallback((e)=>{
     e.preventDefault();
-    setCamera(c=>({...c,distance:clamp(c.distance*(1+e.deltaY*0.001),0.3,20)}));
+    setCamera(c=>sanitizeCamera({...c,distance:clamp(c.distance*(1+e.deltaY*0.001),0.3,20)}));
   }, []);
 
   return (
     <div style={{ display:'flex', flexDirection:'column', height:'100vh', background:C.bg, overflow:'hidden' }}>
 
-      {/* ── Toolbar ── */}
       <div style={{ height:42, background:C.panel, borderBottom:`1px solid ${C.border}`,
-        display:'flex', alignItems:'center', gap:8, padding:'0 12px', flexShrink:0 }}>
-        <span style={{ color:'#fff', fontWeight:700, fontSize:13, marginRight:8 }}>
+        display:'flex', alignItems:'center', gap:8, padding:'0 12px', flexShrink:0, flexWrap:'nowrap' }}>
+        <span style={{ color:'#fff', fontWeight:700, fontSize:13, marginRight:8, whiteSpace:'nowrap' }}>
           <span style={{color:C.acc}}>SDF</span> Editor
         </span>
         <div style={{ width:1, height:20, background:C.border }}/>
@@ -1483,6 +1421,22 @@ function App() {
             onChange={v=>setBounces(Math.max(1, Math.min(5, Math.round(v))))}/>
         </div>
         <div style={{ width:1, height:20, background:C.border }}/>
+        <div style={{ display:'flex', alignItems:'center', gap:5 }} title="Distance de focus">
+          <span style={{ fontSize:10, color:C.dim }}>Focus</span>
+          <NumInput value={camera.focusDistance} step={0.05} min={0.01} width={52}
+            onChange={v=>setCamera(c=>sanitizeCamera({ ...c, focusDistance:v }))}/>
+        </div>
+        <div style={{ display:'flex', alignItems:'center', gap:5 }} title="Focale / zoom caméra">
+          <span style={{ fontSize:10, color:C.dim }}>Focal</span>
+          <NumInput value={camera.focalLen} step={0.02} min={0.05} width={52}
+            onChange={v=>setCamera(c=>sanitizeCamera({ ...c, focalLen:v }))}/>
+        </div>
+        <div style={{ display:'flex', alignItems:'center', gap:5 }} title="Ouverture (depth of field)">
+          <span style={{ fontSize:10, color:C.dim }}>Aperture</span>
+          <NumInput value={camera.aperture} step={0.001} min={0} width={52}
+            onChange={v=>setCamera(c=>sanitizeCamera({ ...c, aperture:v }))}/>
+        </div>
+        <div style={{ width:1, height:20, background:C.border }}/>
         <Btn onClick={newProject} title="Nouvelle scène">✦ New</Btn>
         <Btn onClick={loadProject} title="Charger un projet (.json)">⤒ Load</Btn>
         <Btn onClick={saveProject} title="Sauvegarder le projet (Ctrl+S)">⤓ Save</Btn>
@@ -1494,14 +1448,11 @@ function App() {
           title="Export path-traced multi-pass Shadertoy">↗ Shadertoy</Btn>
       </div>
 
-      {/* ── Body ── */}
       <div style={{ flex:1, display:'flex', minHeight:0 }}>
 
-        {/* ── Left panel ── */}
         <div style={{ width:leftW, background:C.panel, borderRight:`1px solid ${C.border}`,
           display:'flex', flexDirection:'column', flexShrink:0 }}>
 
-          {/* Tree header */}
           <div style={{ padding:'7px 10px', borderBottom:`1px solid ${C.border}`,
             display:'flex', alignItems:'center', justifyContent:'space-between' }}>
             <span style={{ fontSize:10, color:C.dim, textTransform:'uppercase', letterSpacing:'.08em' }}>Objets</span>
@@ -1517,7 +1468,6 @@ function App() {
             </PopupMenu>
           </div>
 
-          {/* Tree */}
           <div style={{ flex:1, overflowY:'auto' }}
             onDragOver={e=>e.preventDefault()}
             onDragLeave={e=>{ if(e.currentTarget===e.target) setDropTarget(null); }}
@@ -1542,7 +1492,6 @@ function App() {
             />
           </div>
 
-          {/* Wrap in modifier — op wrappers are pointless on a single node */}
           {selId && (
             <div style={{ padding:'8px 10px', borderTop:`1px solid ${C.border}` }}>
               <div style={{ fontSize:10, color:C.dim, marginBottom:5, textTransform:'uppercase', letterSpacing:'.06em' }}>
@@ -1561,18 +1510,14 @@ function App() {
           )}
         </div>
 
-        {/* ── Left resize handle ── */}
         <ResizeHandle onMouseDown={startResize('left')} />
 
-        {/* ── Viewport ── */}
         <div style={{ flex:1, position:'relative', overflow:'hidden', minWidth:200 }} onWheel={handleWheel}>
           <canvas ref={glCanvasRef} style={{ position:'absolute', inset:0, width:'100%', height:'100%' }}/>
           <canvas ref={gizmoCanvasRef} style={{ position:'absolute', inset:0, width:'100%', height:'100%', pointerEvents:'none' }}/>
-          {/* Event capture */}
           <div style={{ position:'absolute', inset:0 }}
             onMouseDown={handleMouseDown} onMouseMove={handleMouseMove}
             onMouseUp={handleMouseUp} onMouseLeave={handleMouseUp}/>
-          {/* Status bar */}
           <div style={{ position:'absolute', bottom:12, left:'50%', transform:'translateX(-50%)',
             background:'rgba(10,10,20,.78)', border:`1px solid ${C.border2}`, borderRadius:20,
             padding:'4px 14px', fontSize:10, color:C.dim, pointerEvents:'none' }}>
@@ -1588,10 +1533,8 @@ function App() {
           )}
         </div>
 
-        {/* ── Right resize handle ── */}
         <ResizeHandle onMouseDown={startResize('right')} />
 
-        {/* ── Right panel (properties) ── */}
         <div style={{ width:rightW, background:C.panel, borderLeft:`1px solid ${C.border}`,
           display:'flex', flexDirection:'column', flexShrink:0 }}>
           <div style={{ padding:'7px 10px', borderBottom:`1px solid ${C.border}` }}>
