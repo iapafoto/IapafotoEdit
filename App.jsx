@@ -394,10 +394,20 @@ function TreeItem({ node, depth, selectedId, isRoot, onSelect, onAdd, onDelete, 
 }
 
 // ── Properties Panel ──────────────────────────────────────────────
-function PropsPanel({ node, onChange, palette, tree, isRoot, onOpenMaterials, userLibrary, onEditLibrary }) {
+function PropsPanel({ node, onChange, palette, tree, isRoot, onOpenMaterials, userLibrary, onEditLibrary,
+                       cameraParams, onCameraChange, bounces, onBouncesChange }) {
   if (!node) return (
-    <div style={{ padding:16, color:C.dim, fontSize:11, textAlign:'center', paddingTop:40, lineHeight:1.7 }}>
-      Sélectionnez un objet<br/>pour éditer ses propriétés
+    <div style={{ padding:10, overflowY:'auto', flex:1 }}>
+      <SecTitle>Caméra</SecTitle>
+      <PR label="Focus dist." v={cameraParams.focusDistance} step={0.1} min={0.1}
+        onChange={v=>onCameraChange({...cameraParams, focusDistance:v})}/>
+      <PR label="Focale" v={cameraParams.focalLen} step={0.1} min={0.5}
+        onChange={v=>onCameraChange({...cameraParams, focalLen:v})}/>
+      <PR label="Ouverture" v={cameraParams.aperture} step={0.01} min={0}
+        onChange={v=>onCameraChange({...cameraParams, aperture:v})}/>
+      <div style={{ marginTop:12 }}><SecTitle>Rendu</SecTitle></div>
+      <PR label="Rebonds" v={bounces} step={1} min={1}
+        onChange={v=>onBouncesChange(Math.max(1, Math.min(5, Math.round(v))))}/>
     </div>
   );
   const isShape = SHAPE_TYPES.includes(node.type);
@@ -701,7 +711,7 @@ function getControlPoints(node) {
   return [];
 }
 
-function drawGizmo(ctx, selNode, ancestors, mode, activeAxis, cam, w, h) {
+function drawGizmo(ctx, selNode, ancestors, mode, activeAxis, cam, w, h, axes=AXES) {
   ctx.clearRect(0,0,w,h);
   if (!selNode) return;
   // Gizmo origin = shape's actual world position (chains ancestor transforms).
@@ -709,7 +719,7 @@ function drawGizmo(ctx, selNode, ancestors, mode, activeAxis, cam, w, h) {
   const origin = projectPt(worldOrigin, cam, w, h);
   if (!origin || origin.depth < 0.01) return;
   const gLen = clamp(0.55 * cam.distance / 3, 0.18, 1.6);
-  const sorted = AXES.map(a=>{
+  const sorted = axes.map(a=>{
     const end = projectPt(add3(worldOrigin,scale3(a.dir,gLen)), cam, w, h);
     return {...a, end};
   }).filter(a=>a.end).sort((a,b)=>b.end.depth - a.end.depth);
@@ -827,7 +837,7 @@ function dragAxisDelta(dx, dy, axDir, right, up, scale) {
   return (dx * dot3(axDir, right) - dy * dot3(axDir, up)) * scale;
 }
 
-function hitTestGizmo(mx, my, selNode, ancestors, mode, cam, w, h) {
+function hitTestGizmo(mx, my, selNode, ancestors, mode, cam, w, h, axes=AXES) {
   if (!selNode) return null;
   const cps = getControlPoints(selNode);
   // CP center dots first — exact 10px hit, highest priority.
@@ -841,7 +851,7 @@ function hitTestGizmo(mx, my, selNode, ancestors, mode, cam, w, h) {
   const gLen = clamp(0.55*cam.distance/3,0.18,1.6);
   const cpGLen = gLen * 0.6;
   let best=null, bestD=12;
-  // CP axis arrows — compete with shape axes by proximity.
+  // CP axis arrows always use world axes.
   for (const cp of cps) {
     const cpWorld = worldPointChain(ancestors, selNode, cp.pos);
     const cpScreen = projectPt(cpWorld, cam, w, h);
@@ -859,7 +869,7 @@ function hitTestGizmo(mx, my, selNode, ancestors, mode, cam, w, h) {
   }
   // Shape axes.
   if (!origin) return best;
-  for (const ax of AXES) {
+  for (const ax of axes) {
     const end = projectPt(add3(worldOrigin,scale3(ax.dir,gLen)),cam,w,h);
     if (!end) continue;
     const ox=origin.x, oy=origin.y, ex=end.x, ey=end.y;
@@ -1165,6 +1175,7 @@ function App() {
   const [tree,       setTree]       = useState(() => _initProj?.tree || createDefaultScene());
   const [selId,      setSelId]      = useState(null);
   const [mode,       setMode]       = useState('translate');
+  const [gizmoSpace, setGizmoSpace] = useState('world'); // 'world' | 'local'
   const [camera,     setCamera]     = useState(() => _initProj?.camera || { theta:0.65, phi:0.35, distance:3.2 });
   const [exportCode, setExportCode] = useState(null);
   const [hoverAxis,  setHoverAxis]  = useState(null);
@@ -1412,6 +1423,18 @@ function App() {
     [tree, selId]
   );
 
+  // Effective gizmo axes: world-aligned or object-local.
+  const gizmoAxes = useMemo(() => {
+    if (gizmoSpace === 'world' || !selNode) return AXES;
+    const origin = worldPointChain(selAncestors, selNode, [0,0,0]);
+    return AXES.map(a => {
+      const tip = worldPointChain(selAncestors, selNode, a.dir);
+      return { ...a, dir: normalize3(sub3(tip, origin)) };
+    });
+  }, [gizmoSpace, selNode, selAncestors]);
+  const gizmoAxesRef = useRef(AXES);
+  gizmoAxesRef.current = gizmoAxes;
+
   // Boot renderer
   useEffect(()=>{
     const r = new SDFRenderer(glCanvasRef.current);
@@ -1480,7 +1503,7 @@ function App() {
     const ctx = cvs.getContext('2d');
     const w=cvs.clientWidth, h=cvs.clientHeight;
     cvs.width=w; cvs.height=h;
-    drawGizmo(ctx, selNode, selAncestors, mode, hoverAxis, { ...camera, focalLen: cameraParams.focalLen }, w, h);
+    drawGizmo(ctx, selNode, selAncestors, mode, hoverAxis, { ...camera, focalLen: cameraParams.focalLen }, w, h, gizmoAxes);
   });
 
   // Keyboard shortcuts
@@ -1595,7 +1618,7 @@ function App() {
     const rect = cvs.getBoundingClientRect();
     const mx=e.clientX-rect.left, my=e.clientY-rect.top;
     const w=rect.width, h=rect.height;
-    const hit = hitTestGizmo(mx,my,selNode,selAncestors,mode,cameraRef.current,w,h);
+    const hit = hitTestGizmo(mx,my,selNode,selAncestors,mode,cameraRef.current,w,h,gizmoAxesRef.current);
     if (hit && selNode) {
       e.preventDefault();
       if (hit.startsWith('cp:')) {
@@ -1617,8 +1640,9 @@ function App() {
           nodeId:selNode.id,
         };
       } else {
+        const axEntry = gizmoAxesRef.current.find(a => a.id === hit);
         vpDragRef.current = {
-          type:'gizmo', axis:hit, h,
+          type:'gizmo', axis:hit, axDir: axEntry?.dir, h,
           startMouse:[e.clientX,e.clientY],
           startPos:[...(selNode.position||[0,0,0])],
           startRot:[...(selNode.rotation||[0,0,0])],
@@ -1643,7 +1667,7 @@ function App() {
       // Hover detection
       const cvs=gizmoCanvasRef.current; if(!cvs) return;
       const rect=cvs.getBoundingClientRect();
-      setHoverAxis(hitTestGizmo(e.clientX-rect.left, e.clientY-rect.top, selNode, selAncestors, mode, cameraRef.current, rect.width, rect.height));
+      setHoverAxis(hitTestGizmo(e.clientX-rect.left, e.clientY-rect.top, selNode, selAncestors, mode, cameraRef.current, rect.width, rect.height, gizmoAxesRef.current));
       return;
     }
     if (d.type==='camera') {
@@ -1657,7 +1681,7 @@ function App() {
       const {right,up}=getCamVecs(cam);
       const fL=cam.focalLen||1;
       const dx=e.clientX-d.startMouse[0], dy=e.clientY-d.startMouse[1];
-      const axDir=d.axis==='x'?[1,0,0]:d.axis==='y'?[0,1,0]:[0,0,1];
+      const axDir=d.axDir||(d.axis==='x'?[1,0,0]:d.axis==='y'?[0,1,0]:[0,0,1]);
       if (mode==='translate') {
         // Drag produces a world-space delta; project back into the parent frame
         // (where selNode.position lives) by peeling off every ancestor's transform.
@@ -1726,29 +1750,12 @@ function App() {
           </Btn>
         ))}
         <div style={{ width:1, height:20, background:C.border }}/>
+        <Btn active={gizmoSpace==='world'} onClick={()=>setGizmoSpace('world')} title="Repère monde — axes alignés sur le monde">Monde</Btn>
+        <Btn active={gizmoSpace==='local'} onClick={()=>setGizmoSpace('local')} title="Repère local — axes alignés sur l'objet">Local</Btn>
+        <div style={{ width:1, height:20, background:C.border }}/>
         <Btn onClick={undo} disabled={!canUndo} title="Undo (Ctrl+Z)">↶ Undo</Btn>
         <Btn onClick={redo} disabled={!canRedo} title="Redo (Ctrl+Shift+Z / Ctrl+Y)">↷ Redo</Btn>
         <div style={{ flex:1 }}/>
-        <div style={{ display:'flex', alignItems:'center', gap:5 }} title="Path-tracer bounce count (preview + export)">
-          <span style={{ fontSize:10, color:C.dim }}>Bounces</span>
-          <NumInput value={bounces} step={1} min={1} max={5} width={34}
-            onChange={v=>setBounces(Math.max(1, Math.min(5, Math.round(v))))}/>
-        </div>
-        <div style={{ display:'flex', alignItems:'center', gap:5 }} title="Focus distance for depth of field">
-          <span style={{ fontSize:10, color:C.dim }}>Focus</span>
-          <NumInput value={cameraParams.focusDistance} step={0.1} min={0.1} max={20} width={40}
-            onChange={v=>setCameraParams({...cameraParams, focusDistance:v})}/>
-        </div>
-        <div style={{ display:'flex', alignItems:'center', gap:5 }} title="Focal length">
-          <span style={{ fontSize:10, color:C.dim }}>Focal</span>
-          <NumInput value={cameraParams.focalLen} step={0.1} min={0.5} max={10} width={40}
-            onChange={v=>setCameraParams({...cameraParams, focalLen:v})}/>
-        </div>
-        <div style={{ display:'flex', alignItems:'center', gap:5 }} title="Aperture (depth of field blur)">
-          <span style={{ fontSize:10, color:C.dim }}>Aper.</span>
-          <NumInput value={cameraParams.aperture} step={0.01} min={0} max={1} width={40}
-            onChange={v=>setCameraParams({...cameraParams, aperture:v})}/>
-        </div>
         <div style={{ width:1, height:20, background:C.border }}/>
         <Btn onClick={newProject} title="Nouvelle scène">✦ New</Btn>
         <Btn onClick={loadProject} title="Charger un projet (.json)">⤒ Load</Btn>
@@ -1911,7 +1918,11 @@ function App() {
               if (idx < 0) return;
               if (entry.source === 'subtree') enterLibraryEdit(idx);
               else setLibModalOpen(true);
-            }} />
+            }}
+            cameraParams={cameraParams}
+            onCameraChange={setCameraParams}
+            bounces={bounces}
+            onBouncesChange={setBounces} />
         </div>
       </div>
 
