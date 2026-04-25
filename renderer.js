@@ -29,6 +29,7 @@ uniform float u_selK;           // smooth-op blend factor
 uniform float u_focusDist;      // DOF focus plane distance
 uniform float u_focalLen;       // effective focal length (zoom)
 uniform float u_aperture;       // lens radius (0 = pinhole)
+uniform float u_far;            // raymarching far clip distance
 `;
 
 // u_frame is a float (used as a weight in accumulation); cast to int for
@@ -71,7 +72,7 @@ vec2 trace(vec3 ro,vec3 rd){
     for(int i=ZERO;i<240;i++){
         vec2 s=sceneMap(ro+rd*t);
         if(s.x<.001) return vec2(t,s.y);
-        if(t>30.) break;
+        if(t>u_far) break;
         t+=s.x;
     }
     return vec2(-1.,-1.);
@@ -209,8 +210,9 @@ class SDFRenderer {
     this._matColArr = null; // Float32Array(3*N) → u_matCol[]
     this._matMatArr = null; // Float32Array(4*N) → u_matMat[]
     this.bounces   = 2;
+    this.far       = 30.0;
     this.cameraParams = { focusDistance: 3.2, focalLen: 1.0, aperture: 0.0 };
-    this.maxAccum  = 1024;
+    this.maxAccum  = 128;
     this._lastTree = null;
     this._accumFrame = 0;
     this._fboA = null; this._fboB = null;
@@ -257,6 +259,7 @@ class SDFRenderer {
     if (node && this.selectedId === node.id) {
       this.selData = { ...node };
       this.selType = node.type;
+      this._startLoop();
     }
   }
 
@@ -273,6 +276,24 @@ class SDFRenderer {
         if (packed.params2) out.params2 = packed.params2;
         if (packed.params3) out.params3 = packed.params3;
         if (packed.params4) out.params4 = packed.params4;
+      }
+    } else if (node.type === 'library_ref') {
+      const entry = this._libMap && this._libMap.get(node.libraryId);
+      const entryParams = (entry && entry.params) || [];
+      let fi = 0, vi = 0;
+      for (const ep of entryParams) {
+        const val = p[ep.key];
+        if (ep.type === 'vec3') {
+          const arr = Array.isArray(val) ? val : (Array.isArray(ep.default) ? ep.default : [0,0,0]);
+          if (vi === 0) out.params3 = [arr[0]||0, arr[1]||0, arr[2]||0, 0];
+          else if (vi === 1) out.params4 = [arr[0]||0, arr[1]||0, arr[2]||0, 0];
+          vi++;
+        } else {
+          const num = (val !== undefined && val !== null) ? +val : (ep.default !== undefined ? +ep.default : 0);
+          if (fi < 4) out.params[fi] = num;
+          else if (fi < 8) out.params2[fi-4] = num;
+          fi++;
+        }
       }
     } else if (node.type === 'mirror') {
       out.params  = [p.x?1:0, p.y?1:0, p.z?1:0, Math.max(0, p.eps||0)];
@@ -356,6 +377,7 @@ class SDFRenderer {
   _compileScene(tree, palette, userLibrary) {
     this._lastTree = tree;
     this._lastUserLibrary = userLibrary || [];
+    this._libMap = mergeLibrary(this._lastUserLibrary);
     const pal = (palette && palette.length) ? palette : DEFAULT_PALETTE;
     this.palette = pal;
     const { sceneFn, colorFn, matFn, header, extraFns, usedMaterials } =
@@ -391,7 +413,14 @@ class SDFRenderer {
     this.resetAccum();
   }
 
-  resetAccum() { this._accumFrame = 0; }
+  setFar(v) {
+    v = Math.max(1, +v || 30);
+    if (v === this.far) return;
+    this.far = v;
+    this.resetAccum();
+  }
+
+  resetAccum() { this._accumFrame = 0; this._startLoop(); }
 
   setCameraParams(p) {
     if (!p) return;
@@ -476,6 +505,7 @@ class SDFRenderer {
     u('u_focusDist','uniform1f', cp.focusDistance);
     u('u_focalLen','uniform1f',  cp.focalLen);
     u('u_aperture','uniform1f',  cp.aperture);
+    u('u_far',     'uniform1f',  this.far);
     if (this._matCount > 0 && this._matColArr && this._matMatArr) {
       const lc = gl.getUniformLocation(prog, 'u_matCol[0]');
       if (lc !== null) gl.uniform3fv(lc, this._matColArr);
@@ -487,7 +517,7 @@ class SDFRenderer {
       u('u_selPos','uniform3fv', d.position||[0,0,0]);
       u('u_selRot','uniform3fv', d.rotation||[0,0,0]);
       u('u_selScale','uniform1f', (typeof d.scale === 'number') ? d.scale : 1);
-      if (SHAPE_TYPES.includes(d.type) || MODIFIER_TYPES.includes(d.type)) {
+      if (SHAPE_TYPES.includes(d.type) || MODIFIER_TYPES.includes(d.type) || d.type === 'library_ref') {
         const packed = this._packSelUniforms(d);
         u('u_selParams', 'uniform4fv', packed.params);
         u('u_selParams2','uniform4fv', packed.params2);
@@ -572,7 +602,15 @@ class SDFRenderer {
   }
 
   _startLoop() {
-    const loop = () => { this.render(); this._animId = requestAnimationFrame(loop); };
+    if (this._animId) return;
+    const loop = () => {
+      this.render();
+      if (this._accumFrame < this.maxAccum) {
+        this._animId = requestAnimationFrame(loop);
+      } else {
+        this._animId = null; // done accumulating — pause until state changes
+      }
+    };
     this._animId = requestAnimationFrame(loop);
   }
 

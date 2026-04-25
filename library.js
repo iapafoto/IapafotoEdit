@@ -39,7 +39,7 @@ function parseGlslSignature(src) {
     switch (glslType) {
       case 'vec3': uiType = 'vec3';   defaultVal = [0, 0, 0]; break;
       case 'int':  uiType = 'number'; defaultVal = 0; break;
-      default:     uiType = 'number'; defaultVal = 0;
+      default:     uiType = 'number'; defaultVal = 1;
     }
     params.push({
       key: name, label: name, type: uiType,

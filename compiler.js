@@ -109,6 +109,10 @@ function compileSDF(root, selectedId, palette, opts) {
   const shapes = [];
   const userGlslHeaders = [];   // user-defined GLSL sources emitted once in header
   const usedUserGlsl = new Set(); // prevent duplicate emission
+  const libraryFnCache = new Map();   // key: entryId + '|' + (effectiveInherited||'')  →  fnName
+  const libraryFnSrcs  = [];          // function bodies, append order (inner before outer)
+  const libraryCompiling = new Set(); // cycle detection
+  let   libraryFnCnt   = 0;
 
   // Evaluate a library entry's callTemplate substituting param literals and qVar.
   function evalCallTemplate(entry, nodeParams, qVar) {
@@ -124,6 +128,31 @@ function compileSDF(root, selectedId, palette, opts) {
       }
       const num = (val !== undefined && val !== null) ? val : (param.default || 0);
       return glslNum(num, true);
+    });
+  }
+
+  // Uniform-ref variant: replaces param values with u_selParams slots so the
+  // selected library_ref can be edited live without shader recompilation.
+  // Slot assignment mirrors _packLibRefUniforms in renderer.js.
+  function evalCallTemplateWithUniforms(entry, qVar) {
+    const params = entry.params || [];
+    const floatSlots = [
+      'u_selParams.x','u_selParams.y','u_selParams.z','u_selParams.w',
+      'u_selParams2.x','u_selParams2.y','u_selParams2.z','u_selParams2.w',
+    ];
+    const vec3Slots = ['u_selParams3','u_selParams4'];
+    let fi = 0, vi = 0;
+    const keySlot = {};
+    for (const p of params) {
+      if (p.type === 'vec3') { if (vi < vec3Slots.length) keySlot[p.key] = { kind:'vec3', u:vec3Slots[vi++] }; }
+      else                   { if (fi < floatSlots.length) keySlot[p.key] = { kind:'float', u:floatSlots[fi++] }; }
+    }
+    return (entry.callTemplate || '').replace(/\{(\w+)\}/g, (_, key) => {
+      if (key === 'q') return qVar;
+      const slot = keySlot[key];
+      if (!slot) return '0.';
+      if (slot.kind === 'vec3') return `vec3(${slot.u}.x,${slot.u}.y,${slot.u}.z)`;
+      return slot.u;
     });
   }
 
@@ -364,7 +393,9 @@ function compileSDF(root, selectedId, palette, opts) {
       qVar = 'q';
     }
 
-    const callExpr = evalCallTemplate(entry, node.params, qVar);
+    const callExpr = isSel
+      ? evalCallTemplateWithUniforms(entry, qVar)
+      : evalCallTemplate(entry, node.params, qVar);
     const sId = shapeEmitCnt++;
     let dExpr;
     if (entry.outputKind === 'dist_k' || entry.outputKind === 'dist_mat') {
@@ -510,6 +541,35 @@ function compileSDF(root, selectedId, palette, opts) {
     }
   }
 
+  // Compile a subtree library entry as a standalone GLSL function and return its
+  // name. Returns null to signal the call site to fall back to inline expansion
+  // (used for cycles or missing trees). The function takes `vec3 p` (already
+  // transformed by the instance at the call site) and returns vec2(d, mid).
+  function ensureLibraryFn(entry, effectiveInherited) {
+    if (!entry || !entry.tree) return null;
+    const key = entry.id + '|' + (effectiveInherited || '');
+    const hit = libraryFnCache.get(key);
+    if (hit) return hit;
+    if (libraryCompiling.has(key)) return null;
+
+    const fnName = 'lib_' + (libraryFnCnt++);
+    libraryCompiling.add(key);
+    const before = lines.length;
+    try {
+      emitSubtree(entry.tree, 'p', '_d', '_m', effectiveInherited, '  ', 0, 0);
+    } finally {
+      libraryCompiling.delete(key);
+    }
+    const body = lines.slice(before).join('\n');
+    lines.length = before;
+
+    libraryFnSrcs.push(
+      `vec2 ${fnName}(vec3 p){\n  float _d=1e9, _m=0.;\n  vec3 q;\n${body}\n  return vec2(_d,_m);\n}`
+    );
+    libraryFnCache.set(key, fnName);
+    return fnName;
+  }
+
   // Emit a subtree rooted at `node`, writing its result into (dName, mName).
   // Groups that mutate p open a { vec3 pX=...; ... } block — no save/restore
   // of the outer p since we introduce a fresh name instead.
@@ -524,32 +584,57 @@ function compileSDF(root, selectedId, palette, opts) {
       if (isGlslRef(node)) {
         emitFirstLeaf(node, pName, dName, mName, parentInherited, indent);
       } else {
-        // Subtree ref: apply the ref node's transform, then compile entry.tree inline
+        // Subtree ref: emit the entry's tree as a shared GLSL function and call it.
+        // Identical scheme as glsl-source refs: instance transform applied at the
+        // call site (uniformized when this ref is the selected node), function body
+        // shared across all instances of the same (entry, inherited-material) pair.
         const entry = libMap.get(node.libraryId);
         if (!entry || !entry.tree) {
           lines.push(`${indent}${dName}=1e9; ${mName}=0.;`);
           return;
         }
         const isSel = selectedId && node.id === selectedId;
-        const mutatesP = isSel || !isIdentityTransform(node) || hasPT(node);
-        let workPName = pName, workIndent = indent, newPDepth = pDepth;
-        let scaleMul = null, blockOpened = false;
-        if (mutatesP) {
-          blockOpened = true; newPDepth = pDepth + 1;
-          const newPName = 'p' + suf(newPDepth);
-          lines.push(`${indent}{`); workIndent = indent + '  ';
-          scaleMul = emitNewP(node, pName, newPName, isSel, workIndent).scaleMul;
-          workPName = newPName;
-        }
         const childInherited = node.materialId || parentInherited;
-        emitSubtree(entry.tree, workPName, dName, mName, childInherited, workIndent, newPDepth, aDepth);
-        if (scaleMul) lines.push(`${workIndent}${dName}*=${scaleMul};`);
-        if (hasDT(node)) {
-          const name = `dT_${helperCnt++}`;
-          helperFns.push(`float ${name}(float d, vec3 p){\n${wrapBody(node.dTransform, 'd')}\n}`);
-          lines.push(`${workIndent}${dName}=${name}(${dName},${workPName});`);
+        const fnName = ensureLibraryFn(entry, childInherited);
+
+        if (fnName) {
+          let { qVar, scaleMul } = emitShapeQ(node, pName, isSel, indent);
+          if (hasPT(node)) {
+            const ptName = `pT_${helperCnt++}`;
+            helperFns.push(`vec3 ${ptName}(vec3 p){\n${wrapBody(node.pTransform, 'p')}\n}`);
+            lines.push(`${indent}q=${ptName}(${qVar});`);
+            qVar = 'q';
+          }
+          const sId = shapeEmitCnt++;
+          lines.push(`${indent}vec2 t${sId}=${fnName}(${qVar});`);
+          let dRhs = scaleMul ? `t${sId}.x*${scaleMul}` : `t${sId}.x`;
+          if (hasDT(node)) {
+            const dtName = `dT_${helperCnt++}`;
+            helperFns.push(`float ${dtName}(float d, vec3 p){\n${wrapBody(node.dTransform, 'd')}\n}`);
+            dRhs = `${dtName}(${dRhs},${qVar})`;
+          }
+          lines.push(`${indent}${dName}=${dRhs}; ${mName}=t${sId}.y;`);
+        } else {
+          // Cycle detected — fall back to inline expansion to keep GLSL valid.
+          const mutatesP = isSel || !isIdentityTransform(node) || hasPT(node);
+          let workPName = pName, workIndent = indent, newPDepth = pDepth;
+          let scaleMul = null, blockOpened = false;
+          if (mutatesP) {
+            blockOpened = true; newPDepth = pDepth + 1;
+            const newPName = 'p' + suf(newPDepth);
+            lines.push(`${indent}{`); workIndent = indent + '  ';
+            scaleMul = emitNewP(node, pName, newPName, isSel, workIndent).scaleMul;
+            workPName = newPName;
+          }
+          emitSubtree(entry.tree, workPName, dName, mName, childInherited, workIndent, newPDepth, aDepth);
+          if (scaleMul) lines.push(`${workIndent}${dName}*=${scaleMul};`);
+          if (hasDT(node)) {
+            const name = `dT_${helperCnt++}`;
+            helperFns.push(`float ${name}(float d, vec3 p){\n${wrapBody(node.dTransform, 'd')}\n}`);
+            lines.push(`${workIndent}${dName}=${name}(${dName},${workPName});`);
+          }
+          if (blockOpened) lines.push(`${indent}}`);
         }
-        if (blockOpened) lines.push(`${indent}}`);
       }
       return;
     }
@@ -629,7 +714,7 @@ function compileSDF(root, selectedId, palette, opts) {
   if (smoothFns.has('smin')) smoothSrc.push(SMIN_GLSL);
   if (smoothFns.has('smax')) smoothSrc.push(SMAX_GLSL);
   if (smoothFns.has('ssub')) smoothSrc.push(SSUB_GLSL);
-  const extraFns = [...smoothSrc, ...helperFns].join('\n');
+  const extraFns = [...smoothSrc, ...helperFns, ...libraryFnSrcs].join('\n');
   return {
     sceneFn, colorFn, matFn,
     header, extraFns,

@@ -4,8 +4,8 @@ const { useState, useEffect, useRef, useCallback, useMemo } = React;
 const PROJECT_FORMAT = 'iapafoto-edit';
 const PROJECT_VERSION = 1;
 const AUTOSAVE_KEY = 'iapafoto-edit:autosave:v1';
-function serializeProject(tree, palette, camera, bounces, cameraParams, userLibrary) {
-  return { format: PROJECT_FORMAT, version: PROJECT_VERSION, tree, palette, camera, bounces, cameraParams, userLibrary: userLibrary || [] };
+function serializeProject(tree, palette, camera, bounces, far, cameraParams, userLibrary) {
+  return { format: PROJECT_FORMAT, version: PROJECT_VERSION, tree, palette, camera, bounces, far, cameraParams, userLibrary: userLibrary || [] };
 }
 function isValidProject(p) {
   return p && p.format === PROJECT_FORMAT && p.tree && Array.isArray(p.palette);
@@ -349,7 +349,7 @@ function TreeItem({ node, depth, selectedId, isRoot, onSelect, onAdd, onDelete, 
                   : dropMode === 'after'  ? `inset 0 -2px 0 ${C.Y}`
                   : 'none',
         }}
-        onClick={()=>onSelect(node.id)}
+        onClick={()=>onSelect(isSel ? null : node.id)}
         onMouseEnter={()=>setHov(true)} onMouseLeave={()=>setHov(false)}
       >
         {isGroup && (
@@ -358,7 +358,7 @@ function TreeItem({ node, depth, selectedId, isRoot, onSelect, onAdd, onDelete, 
             {open?'▾':'▸'}
           </span>
         )}
-        {isShape && <span style={{ width:13 }}/>}
+        {(isShape || isLibRef) && <span style={{ width:13 }}/>}
         <span style={{ fontSize:11, color:tint, marginRight:6, fontFamily:'monospace', flexShrink:0 }}>
           {icon}
         </span>
@@ -395,7 +395,7 @@ function TreeItem({ node, depth, selectedId, isRoot, onSelect, onAdd, onDelete, 
 
 // ── Properties Panel ──────────────────────────────────────────────
 function PropsPanel({ node, onChange, palette, tree, isRoot, onOpenMaterials, userLibrary, onEditLibrary,
-                       cameraParams, onCameraChange, bounces, onBouncesChange }) {
+                       cameraParams, onCameraChange, bounces, onBouncesChange, far, onFarChange }) {
   if (!node) return (
     <div style={{ padding:10, overflowY:'auto', flex:1 }}>
       <SecTitle>Caméra</SecTitle>
@@ -408,6 +408,8 @@ function PropsPanel({ node, onChange, palette, tree, isRoot, onOpenMaterials, us
       <div style={{ marginTop:12 }}><SecTitle>Rendu</SecTitle></div>
       <PR label="Rebonds" v={bounces} step={1} min={1}
         onChange={v=>onBouncesChange(Math.max(1, Math.min(5, Math.round(v))))}/>
+      <PR label="Far" v={far} step={1} min={1} max={500}
+        onChange={v=>onFarChange(Math.max(1, Math.round(v)))}/>
     </div>
   );
   const isShape = SHAPE_TYPES.includes(node.type);
@@ -1185,6 +1187,7 @@ function App() {
   const [palette,      setPalette]      = useState(() => _initProj?.palette || DEFAULT_PALETTE);
   const [materialsOpen,setMaterialsOpen]= useState(false);
   const [bounces,      setBounces]      = useState(() => (typeof _initProj?.bounces === 'number') ? _initProj.bounces : 2);
+  const [far,          setFar]          = useState(() => (typeof _initProj?.far === 'number') ? _initProj.far : 30);
   const [cameraParams, setCameraParams] = useState(() => _initProj?.cameraParams || { focusDistance: 3.2, focalLen: 2.8, aperture: 0.1 });
   const [userLibrary,  setUserLibrary]  = useState(() => _initProj?.userLibrary || []);
   const [libModalOpen, setLibModalOpen] = useState(false);
@@ -1331,11 +1334,13 @@ function App() {
   // Autosave: localStorage, debounced 800ms on tree/palette/camera/bounces.
   const bouncesRef = useRef(bounces);
   useEffect(()=>{ bouncesRef.current = bounces; }, [bounces]);
+  const farRef = useRef(far);
+  useEffect(()=>{ farRef.current = far; }, [far]);
   const cameraParamsRef = useRef(cameraParams);
   useEffect(()=>{ cameraParamsRef.current = cameraParams; }, [cameraParams]);
 
   const saveProject = useCallback(() => {
-    const data = serializeProject(treeRef.current, paletteRef.current, cameraRef.current, bouncesRef.current, cameraParamsRef.current, userLibraryRef.current);
+    const data = serializeProject(treeRef.current, paletteRef.current, cameraRef.current, bouncesRef.current, farRef.current, cameraParamsRef.current, userLibraryRef.current);
     const blob = new Blob([JSON.stringify(data, null, 2)], { type:'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -1368,6 +1373,7 @@ function App() {
     setPalette(p.palette);
     if (p.camera) setCamera(p.camera);
     if (typeof p.bounces === 'number') setBounces(clamp(Math.round(p.bounces), 1, 5));
+    if (typeof p.far === 'number') setFar(Math.max(1, p.far));
     if (p.cameraParams) setCameraParams(p.cameraParams);
     if (Array.isArray(p.userLibrary)) setUserLibrary(p.userLibrary);
     setEditingLibEntry(null);
@@ -1399,7 +1405,7 @@ function App() {
   const newProject = useCallback(() => {
     if (!window.confirm('Nouvelle scène ? Les changements non sauvegardés seront perdus.')) return;
     applyLoadedProject(
-      { tree: createDefaultScene(), palette: DEFAULT_PALETTE, camera: { theta:0.65, phi:0.35, distance:3.2 }, bounces: 2, cameraParams: { focusDistance: 3.2, focalLen: 2.8, aperture: 0.1 } },
+      { tree: createDefaultScene(), palette: DEFAULT_PALETTE, camera: { theta:0.65, phi:0.35, distance:3.2 }, bounces: 2, far: 30, cameraParams: { focusDistance: 3.2, focalLen: 2.8, aperture: 0.1 } },
       { undoable: false }
     );
   }, [applyLoadedProject]);
@@ -1410,11 +1416,11 @@ function App() {
     const t = setTimeout(() => {
       try {
         localStorage.setItem(AUTOSAVE_KEY,
-          JSON.stringify(serializeProject(tree, palette, camera, bounces, cameraParams, userLibrary)));
+          JSON.stringify(serializeProject(tree, palette, camera, bounces, far, cameraParams, userLibrary)));
       } catch {}
     }, 800);
     return () => clearTimeout(t);
-  }, [tree, palette, camera, bounces, cameraParams, userLibrary, editingLibEntry]);
+  }, [tree, palette, camera, bounces, far, cameraParams, userLibrary, editingLibEntry]);
 
   const selNode = useMemo(()=> selId ? findNode(tree, selId) : null, [tree, selId]);
   // Ancestor chain of the selected node — lets the gizmo match the compiled transform stack.
@@ -1483,7 +1489,9 @@ function App() {
 
   // Sync camera
   useEffect(()=>{
-    if (rendererRef.current) rendererRef.current.camera = {...camera};
+    const r = rendererRef.current; if (!r) return;
+    r.camera = {...camera};
+    r.resetAccum(); // wake loop if paused, stateSig handles actual reset
   }, [camera]);
 
   // Bounces recompiles the shader (BOUNCE is baked as a #define) and resets
@@ -1491,6 +1499,10 @@ function App() {
   useEffect(()=>{
     if (rendererRef.current) rendererRef.current.setBounces(bounces);
   }, [bounces]);
+
+  useEffect(()=>{
+    if (rendererRef.current) rendererRef.current.setFar(far);
+  }, [far]);
 
   // Live camera params → renderer (focusDistance / focalLen / aperture).
   useEffect(()=>{
@@ -1765,7 +1777,7 @@ function App() {
         <div style={{ width:1, height:20, background:C.border }}/>
         <Btn onClick={()=>setMaterialsOpen(true)} title="Éditer la palette">◆ Matériaux</Btn>
         <Btn onClick={()=>setLibModalOpen(true)} title="Bibliothèque SDF">⊞ Bibliothèque</Btn>
-        <Btn onClick={()=>setExportCode(exportShadertoyPathTraced(tree, palette, bounces, cameraParams, userLibrary))}
+        <Btn onClick={()=>setExportCode(exportShadertoyPathTraced(tree, palette, bounces, { ...cameraParams, distance: camera.distance }, userLibrary, far))}
           title="Export path-traced multi-pass Shadertoy">↗ Shadertoy</Btn>
       </div>
 
@@ -1922,7 +1934,9 @@ function App() {
             cameraParams={cameraParams}
             onCameraChange={setCameraParams}
             bounces={bounces}
-            onBouncesChange={setBounces} />
+            onBouncesChange={setBounces}
+            far={far}
+            onFarChange={setFar} />
         </div>
       </div>
 

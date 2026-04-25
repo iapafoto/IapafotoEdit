@@ -8,17 +8,18 @@
 //
 // The compiler is invoked with no selectedId and materialUniforms=false,
 // so everything is baked as literals — no uniforms to wire in Shadertoy.
-function exportShadertoyPathTraced(tree, palette, bounces=2, cameraParams={focusDistance:3.2, focalLen:2.8, aperture:0.1}, userLibrary=[]) {
+function exportShadertoyPathTraced(tree, palette, bounces=2, cameraParams={focusDistance:3.2, focalLen:2.8, aperture:0.1, distance:3.2}, userLibrary=[], far=30) {
   const { sceneFn, colorFn, matFn, header, extraFns } =
     compileSDF(tree, null, palette, { materialUniforms: false, userLibrary });
   const B = Math.max(1, Math.min(5, Math.round(bounces)));
-  const { focusDistance = 3.2, focalLen = 2.8, aperture = 0.1 } = cameraParams;
+  const { focusDistance = 3.2, focalLen = 2.8, aperture = 0.1, distance = 3.2 } = cameraParams;
 
   const bufferA = `// ============================================================
 // BUFFER A — progressive path tracer
 // Set iChannel0 = Buffer A (self-feedback)
 // ============================================================
 #define BOUNCE ${B}
+#define u_far ${far.toFixed(3)}
 // Shadertoy's iFrame is int → ZERO stays int, no cast needed.
 #define ZERO (min(iFrame,0))
 
@@ -66,7 +67,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord){
     float th=3.0 - mo.x/iResolution.x * 6.28318;
     float ph=0.35 + (mo.y/iResolution.y - .5) * 2.2;
     ph=clamp(ph,-1.5,1.5);
-    float dist=3.2;
+    float dist=${distance.toFixed(4)};
     vec3 ro=vec3(dist*cos(ph)*sin(th), dist*sin(ph), dist*cos(ph)*cos(th));
 
     vec2 uv=(2.*(fragCoord.xy + vec2(ptHash(),ptHash())-.5)-iResolution.xy)/iResolution.y;

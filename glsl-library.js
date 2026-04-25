@@ -77,10 +77,21 @@ vec2 sdBezier(vec3 pos, vec3 A, vec3 B, vec3 C) {
     return res;
 }`,
   sdPlane:     `float sdPlane(vec3 p,vec4 n){return dot(p,n.xyz)+n.w;}`,
+  noise3D: `float noise3D(vec3 p){
+    vec3 s=vec3(113,157,1),ip=floor(p);
+    vec4 h=vec4(0,s.yz,s.y+s.z)+dot(ip,s);
+    p-=ip; p=p*p*(3.-2.*p);
+    h=mix(fract(sin(h)*43758.5453),fract(sin(h+s.x)*43758.5453),p.x);
+    h.xy=mix(h.xz,h.yw,p.y);
+    return mix(h.x,h.y,p.z);
+  }`,
+  fbm: `float fbm(in vec3 p){
+    return .5333*noise3D(p)+.2667*noise3D(p*2.02)+.1333*noise3D(p*4.03)+.0667*noise3D(p*8.03);
+  }`,
 };
 
 // Base headers always emitted (transforms used by every transformed node)
-const GLSL_BASE_DEPS = ['rotX', 'rotY', 'rotZ', 'invT'];
+const GLSL_BASE_DEPS = ['rotX', 'rotY', 'rotZ', 'invT', 'noise3D', 'fbm'];
 
 // Build a GLSL header string from a set of dependency names.
 function buildGlslHeader(deps) {
